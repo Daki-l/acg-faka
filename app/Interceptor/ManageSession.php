@@ -73,7 +73,7 @@ class ManageSession implements InterceptorInterface
         if (
             $jwt->expire <= time() ||
             $manage->login_time != $jwt->loginTime ||
-            $manage->login_ip != Client::getAddress() ||
+            // $manage->login_ip != Client::getAddress() ||
             $manage->status != 1
         ) {
             $this->kick($type);
