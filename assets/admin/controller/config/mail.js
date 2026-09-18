@@ -165,3 +165,271 @@
     window.__mdConfigMailDestroy = destroy;
     $(document).off('pjax:beforeReplace' + namespace).one('pjax:beforeReplace' + namespace, destroy);
 }();
+
+!function () {
+    const namespace = '.mdOrderEmailTemplate';
+    const $form = $('#order-email-template-form');
+    let active = true;
+    let busy = false;
+    let loaded = false;
+
+    if (!$form.length) return;
+    if (typeof window.__mdOrderEmailTemplateDestroy === 'function') window.__mdOrderEmailTemplateDestroy();
+
+    function fields() {
+        return {
+            logo_url: String($form.find('[name="logo_url"]').val() || '').trim(),
+            subject: String($form.find('[name="subject"]').val() || '').trim(),
+            html: String($form.find('[name="html"]').val() || '')
+        };
+    }
+
+    function setBusy(value) {
+        busy = value;
+        $('.order-email-template-preview, .order-email-template-restore, .order-email-template-test, .order-email-template-save')
+            .prop('disabled', value)
+            .toggleClass('disabled', value)
+            .attr('aria-busy', value ? 'true' : null);
+    }
+
+    function error(messageText) {
+        if (active) message.error(messageText);
+    }
+
+    function applyTemplate(template) {
+        if (!template || typeof template !== 'object') return;
+        $form.find('[name="logo_url"]').val(template.logo_url || '');
+        $form.find('[name="subject"]').val(template.subject || '');
+        $form.find('[name="html"]').val(template.html || '');
+    }
+
+    function setPreview(html) {
+        const preview = document.getElementById('order-email-template-preview');
+        if (preview) preview.srcdoc = String(html || '');
+    }
+
+    function copyPlaceholder(value) {
+        const copied = () => layer.msg('已复制 ' + value);
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(value).then(copied).catch(() => fallbackCopy(value, copied));
+            return;
+        }
+        fallbackCopy(value, copied);
+    }
+
+    function fallbackCopy(value, done) {
+        const input = document.createElement('textarea');
+        input.value = value;
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.select();
+        const copied = document.execCommand('copy');
+        input.remove();
+        if (copied) done();
+        else error('无法复制占位符，请手动复制');
+    }
+
+    function renderPlaceholders(placeholders) {
+        const container = document.getElementById('order-email-template-placeholders');
+        if (!container) return;
+        container.textContent = '';
+        Object.entries(placeholders || {}).forEach(([name, label]) => {
+            const placeholder = '{{' + name + '}}';
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-sm btn-light-primary md-order-email-template__placeholder';
+            button.dataset.placeholder = placeholder;
+            button.title = String(label || name) + '，点击复制';
+            button.textContent = placeholder;
+            container.appendChild(button);
+        });
+    }
+
+    function ensureLoaded() {
+        if (loaded) return true;
+        layer.msg('邮件模板正在加载，请稍候');
+        return false;
+    }
+
+    function refreshPreview(notice) {
+        if (!active || busy || !ensureLoaded()) return;
+        setBusy(true);
+        util.post({
+            url: '/admin/api/config/orderEmailTemplatePreview',
+            data: fields(),
+            done: res => {
+                if (!active) return;
+                setBusy(false);
+                setPreview(res.data?.html);
+                if (notice) layer.msg('预览已刷新');
+            },
+            error: res => {
+                if (!active) return;
+                setBusy(false);
+                error(res?.msg || '邮件模板预览失败');
+            },
+            fail: () => {
+                if (!active) return;
+                setBusy(false);
+                error('网络异常，邮件模板预览失败');
+            }
+        });
+    }
+
+    function saveTemplate() {
+        if (!active || busy || !ensureLoaded()) return;
+        setBusy(true);
+        util.post({
+            url: '/admin/api/config/orderEmailTemplateSave',
+            data: fields(),
+            done: res => {
+                if (!active) return;
+                setBusy(false);
+                applyTemplate(res.data?.template);
+                layer.msg(res.msg || '模板已保存');
+                refreshPreview(false);
+            },
+            error: res => {
+                if (!active) return;
+                setBusy(false);
+                error(res?.msg || '邮件模板保存失败');
+            },
+            fail: () => {
+                if (!active) return;
+                setBusy(false);
+                error('网络异常，邮件模板保存失败');
+            }
+        });
+    }
+
+    function restoreTemplate() {
+        if (!active || busy || !ensureLoaded()) return;
+        layer.confirm('恢复后将覆盖当前未保存的模板内容，是否继续？', {btn: ['恢复默认', '取消']}, index => {
+            layer.close(index);
+            setBusy(true);
+            util.post({
+                url: '/admin/api/config/orderEmailTemplateRestore',
+                data: {},
+                done: res => {
+                    if (!active) return;
+                    setBusy(false);
+                    applyTemplate(res.data?.template);
+                    layer.msg(res.msg || '已恢复默认模板');
+                    refreshPreview(false);
+                },
+                error: res => {
+                    if (!active) return;
+                    setBusy(false);
+                    error(res?.msg || '恢复默认模板失败');
+                },
+                fail: () => {
+                    if (!active) return;
+                    setBusy(false);
+                    error('网络异常，恢复默认模板失败');
+                }
+            });
+        });
+    }
+
+    function sendTemplateTest(address, index) {
+        const email = String(address || '').trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            layer.msg('请输入正确的邮箱地址');
+            return false;
+        }
+        if (busy || !ensureLoaded()) return false;
+        setBusy(true);
+        util.post({
+            url: '/admin/api/config/orderEmailTemplateTest',
+            data: {...fields(), email: email},
+            done: res => {
+                if (!active) return;
+                setBusy(false);
+                layer.msg(res.msg || '测试邮件发送成功');
+                layer.close(index);
+            },
+            error: res => {
+                if (!active) return;
+                setBusy(false);
+                error(res?.msg || '测试邮件发送失败');
+            },
+            fail: () => {
+                if (!active) return;
+                setBusy(false);
+                error('网络异常，测试邮件发送失败');
+            }
+        });
+        return true;
+    }
+
+    function showTestDialog() {
+        if (busy || !ensureLoaded()) return;
+        component.popup({
+            width: '480px',
+            height: 'auto',
+            autoPosition: true,
+            confirmText: '<i class="fa-duotone fa-regular fa-paper-plane"></i> 发送模板测试邮件',
+            tab: [{
+                name: '发送模板测试邮件',
+                form: [{
+                    title: '邮箱地址',
+                    name: 'email',
+                    type: 'input',
+                    placeholder: '请输入接收测试邮件的地址',
+                    required: true,
+                    regex: {value: '^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$', message: '请输入正确的邮箱地址'}
+                }]
+            }],
+            submit: (data, index) => sendTemplateTest(data.email, index)
+        });
+    }
+
+    function loadTemplate() {
+        setBusy(true);
+        util.post({
+            url: '/admin/api/config/orderEmailTemplateGet',
+            data: {},
+            done: res => {
+                if (!active) return;
+                setBusy(false);
+                applyTemplate(res.data?.template);
+                renderPlaceholders(res.data?.placeholders);
+                loaded = true;
+                refreshPreview(false);
+            },
+            error: res => {
+                if (!active) return;
+                setBusy(false);
+                error(res?.msg || '邮件模板加载失败');
+            },
+            fail: () => {
+                if (!active) return;
+                setBusy(false);
+                error('网络异常，邮件模板加载失败');
+            }
+        });
+    }
+
+    $('#order-email-template-placeholders').off(namespace).on('click' + namespace, '[data-placeholder]', function () {
+        copyPlaceholder(String(this.dataset.placeholder || ''));
+    });
+    $('.order-email-template-preview').off(namespace).on('click' + namespace, () => refreshPreview(true));
+    $('.order-email-template-save').off(namespace).on('click' + namespace, saveTemplate);
+    $('.order-email-template-restore').off(namespace).on('click' + namespace, restoreTemplate);
+    $('.order-email-template-test').off(namespace).on('click' + namespace, showTestDialog);
+
+    function destroy() {
+        if (!active) return;
+        active = false;
+        $form.off(namespace);
+        $('#order-email-template-placeholders, .order-email-template-preview, .order-email-template-save, .order-email-template-restore, .order-email-template-test').off(namespace);
+        $(document).off('pjax:beforeReplace' + namespace);
+        setPreview('');
+        if (window.__mdOrderEmailTemplateDestroy === destroy) delete window.__mdOrderEmailTemplateDestroy;
+    }
+
+    window.__mdOrderEmailTemplateDestroy = destroy;
+    $(document).off('pjax:beforeReplace' + namespace).one('pjax:beforeReplace' + namespace, destroy);
+    loadTemplate();
+}();

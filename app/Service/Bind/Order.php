@@ -19,6 +19,7 @@ use App\Model\User;
 use App\Model\UserCommodity;
 use App\Model\UserGroup;
 use App\Service\Email;
+use App\Service\OrderDeliveryEmailTemplate;
 use App\Service\Shared;
 use App\Util\Client;
 use App\Util\Currency;
@@ -70,6 +71,9 @@ class Order implements \App\Service\Order
 
     #[Inject]
     private Email $email;
+
+    #[Inject]
+    private OrderDeliveryEmailTemplate $orderDeliveryEmailTemplate;
 
     public function calcAmount(int $owner, int $num, Commodity $commodity, ?UserGroup $group, ?string $race = null, bool $disableSubstation = false, ?array $sku = []): float
     {
@@ -1109,7 +1113,8 @@ class Order implements \App\Service\Order
 
         if ($commodity->contact_type == 2 && $commodity->send_email == 1 && $order->owner == 0) {
             try {
-                $this->email->send($order->contact, "【发货提醒】您购买的卡密发货啦", "您购买的卡密如下：" . $order->secret);
+                $mail = $this->orderDeliveryEmailTemplate->render($order, $commodity, $order->pay);
+                $this->email->send($order->contact, $mail['subject'], $mail['html']);
             } catch (\Exception|\Error $e) {
             }
         }

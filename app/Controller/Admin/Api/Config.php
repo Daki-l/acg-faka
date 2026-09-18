@@ -13,6 +13,7 @@ use App\Model\Category;
 use App\Model\Config as CFG;
 use App\Model\ManageLog;
 use App\Service\Email;
+use App\Service\OrderDeliveryEmailTemplate;
 use App\Service\Query;
 use App\Service\Sms;
 use App\Util\CallbackIpWhitelist;
@@ -156,6 +157,9 @@ class Config extends Manage
 
     #[Inject]
     private Email $email;
+
+    #[Inject]
+    private OrderDeliveryEmailTemplate $orderDeliveryEmailTemplate;
 
     #[Inject]
     private \App\Service\Currency $currency;
@@ -1184,6 +1188,74 @@ class Config extends Manage
         }
         ManageLog::log($this->getManage(), "测试了邮件发送");
         return $this->json(200, "成功!");
+    }
+
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
+    public function orderEmailTemplateGet(): array
+    {
+        $this->configPost([], '订单发货邮件模板');
+        return $this->json(200, null, [
+            'template' => $this->orderDeliveryEmailTemplate->getTemplate(),
+            'placeholders' => $this->orderDeliveryEmailTemplate->placeholders(),
+        ]);
+    }
+
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
+    public function orderEmailTemplateSave(): array
+    {
+        $template = $this->orderDeliveryEmailTemplate->save(...$this->orderEmailTemplateInput(
+            $this->configPost(['subject', 'html', 'logo_url'], '订单发货邮件模板')
+        ));
+        ManageLog::log($this->getManage(), '修改了订单发货邮件模板');
+        return $this->json(200, '保存成功', ['template' => $template]);
+    }
+
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
+    public function orderEmailTemplatePreview(): array
+    {
+        $preview = $this->orderDeliveryEmailTemplate->preview(...$this->orderEmailTemplateInput(
+            $this->configPost(['subject', 'html', 'logo_url'], '订单发货邮件模板')
+        ));
+        return $this->json(200, null, $preview);
+    }
+
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
+    public function orderEmailTemplateRestore(): array
+    {
+        $this->configPost([], '恢复默认订单发货邮件模板');
+        $template = $this->orderDeliveryEmailTemplate->restore();
+        ManageLog::log($this->getManage(), '恢复了默认订单发货邮件模板');
+        return $this->json(200, '已恢复默认模板', ['template' => $template]);
+    }
+
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
+    public function orderEmailTemplateTest(): array
+    {
+        $map = $this->configPost(['email', 'subject', 'html', 'logo_url'], '订单发货模板测试邮件');
+        $address = $this->configString($map, 'email', 320, '邮箱地址', true);
+        if (!PHPMailer::validateAddress($address)) {
+            throw new JSONException('请输入正确的邮箱地址');
+        }
+
+        $mail = $this->orderDeliveryEmailTemplate->preview(...$this->orderEmailTemplateInput($map));
+        $this->consumeTestSendQuota('email');
+        $result = $this->email->send($address, $mail['subject'], $mail['html']);
+        if (!$result) {
+            throw new JSONException($this->emailFailureMessage($this->email->getLastError()));
+        }
+
+        ManageLog::log($this->getManage(), '发送了订单发货邮件模板测试邮件');
+        return $this->json(200, '测试邮件发送成功');
+    }
+
+    /** @return array{0: string, 1: string, 2: string} */
+    private function orderEmailTemplateInput(array $map): array
+    {
+        return [
+            $this->configString($map, 'subject', 255, '邮件主题', true),
+            $this->configString($map, 'html', 60000, 'HTML 模板', true),
+            $this->configString($map, 'logo_url', 2048, 'Logo 地址', true),
+        ];
     }
 
     private function emailFailureMessage(string $error): string

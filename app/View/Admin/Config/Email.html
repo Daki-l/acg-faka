@@ -13,6 +13,32 @@
         vertical-align: 0;
     }
 
+    :root[data-theme] .md-order-email-template__placeholders {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    :root[data-theme] .md-order-email-template__placeholder {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    :root[data-theme] .md-order-email-template__html {
+        min-height: 420px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.5;
+    }
+
+    :root[data-theme] .md-order-email-template__preview {
+        display: block;
+        width: 100%;
+        height: 640px;
+        border: 1px solid var(--bs-gray-300);
+        background: #f4f6f8;
+    }
+
     @media (max-width: 991.98px) {
         html[data-admin-layout="mobile"] .md-config-test-layer .layui-layer-input {
             box-sizing: border-box;
@@ -29,6 +55,10 @@
 
         html[data-admin-layout="mobile"] .md-config-test-layer .layui-layer-input:focus {
             box-shadow: 0 0 0 3px color-mix(in srgb, var(--admin-mobile-primary) 20%, transparent);
+        }
+
+        html[data-admin-layout="mobile"] .md-order-email-template__preview {
+            height: 500px;
         }
     }
 </style>
@@ -194,6 +224,61 @@
                 <!--end::Content-->
             </div>
             <!--end::Basic info-->
+
+            <div class="card mb-5 mb-xl-10 md-order-email-template">
+                <div class="card-header border-0">
+                    <div class="card-title m-0">
+                        <h3 class="fw-bolder m-0">订单发货邮件模板</h3>
+                    </div>
+                </div>
+                <form id="order-email-template-form" method="post" class="form">
+                    <div class="card-body p-9">
+                        <div class="row mb-6">
+                            <label class="col-lg-4 col-form-label required fw-bold fs-6" for="order-email-template-logo">Logo URL</label>
+                            <div class="col-lg-8 fv-row">
+                                <input id="order-email-template-logo" type="url" name="logo_url" inputmode="url" autocapitalize="none" spellcheck="false"
+                                       class="form-control form-control-lg form-control-solid" placeholder="https://example.com/logo.png">
+                            </div>
+                        </div>
+
+                        <div class="row mb-6">
+                            <label class="col-lg-4 col-form-label required fw-bold fs-6" for="order-email-template-subject">邮件主题</label>
+                            <div class="col-lg-8 fv-row">
+                                <input id="order-email-template-subject" type="text" name="subject" maxlength="255"
+                                       class="form-control form-control-lg form-control-solid" placeholder="【发货提醒】Weiloo 小店订单已发货">
+                            </div>
+                        </div>
+
+                        <div class="row mb-6">
+                            <label class="col-lg-4 col-form-label fw-bold fs-6">可用占位符</label>
+                            <div class="col-lg-8 fv-row">
+                                <div id="order-email-template-placeholders" class="md-order-email-template__placeholders"></div>
+                            </div>
+                        </div>
+
+                        <div class="row mb-6">
+                            <label class="col-lg-4 col-form-label required fw-bold fs-6" for="order-email-template-html">HTML 模板</label>
+                            <div class="col-lg-8 fv-row">
+                                <textarea id="order-email-template-html" name="html" rows="20" maxlength="60000"
+                                          class="form-control form-control-solid md-order-email-template__html" spellcheck="false"></textarea>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-lg-4 col-form-label fw-bold fs-6">预览</div>
+                            <div class="col-lg-8 fv-row">
+                                <iframe id="order-email-template-preview" class="md-order-email-template__preview" sandbox="" title="订单发货邮件预览"></iframe>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer d-flex flex-wrap justify-content-center py-6 px-9 gap-2">
+                        <button type="button" class="btn btn-light order-email-template-preview"><i class="fa-duotone fa-regular fa-arrows-rotate me-2"></i>刷新预览</button>
+                        <button type="button" class="btn btn-light-danger order-email-template-restore"><i class="fa-duotone fa-regular fa-arrow-rotate-left me-2"></i>恢复默认</button>
+                        <button type="button" class="btn btn-success order-email-template-test md-config-send-test"><svg class="md-message-send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 6.5h10a2 2 0 0 1 2 2v2.25M3.5 7l5 4 5-4M3.5 6.5v9a2 2 0 0 0 2 2h7.25M14 14h6m-2.5-2.5L20 14l-2.5 2.5"/></svg><span>发送模板测试邮件</span></button>
+                        <button type="button" class="btn btn-primary order-email-template-save"><i class="fa-duotone fa-regular fa-floppy-disk me-2"></i>保存模板</button>
+                    </div>
+                </form>
+            </div>
         </div>
         <!--end::Container-->
     </div>
