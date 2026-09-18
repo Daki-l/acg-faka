@@ -7,37 +7,21 @@ use App\Consts\Render;
 use App\Model\Business;
 use App\Model\Config;
 use App\Util\Client;
+use App\Util\RichHtml;
+use App\Util\ViewSafe;
 use App\Util\Theme;
 use Kernel\Exception\JSONException;
 use Kernel\Exception\ViewException;
 use Kernel\Util\View;
 
-/**
- * Class Manage
- * @package App\Controller\Base\View
- */
 abstract class User extends \App\Controller\Base\User
 {
-    /**
-     * @var array|string[]
-     */
     protected array $indexTemplateList = [
         'INDEX', 'ITEM', 'QUERY', 'CLOSED'
     ];
 
-    /**
-     * config 里站长自填、买家可见的中文文案。这些既不在静态词包里，主题也不会各自记得包 lang()
-     * （shop_name/closed_message 连 Cartoon 都没包），所以在渲染出口统一翻译，issue #832。
-     * 只列展示文案：service_url、各类开关与路径不在其中。
-     * 店名/站点标题若不希望被翻译，在 TranslationBot 的 brand_words 里登记即可。
-     */
     private const TRANSLATABLE_CONFIG = ['notice', 'shop_name', 'title', 'closed_message', 'commodity_name'];
 
-    /**
-     * 统一翻译 config 里的展示文案（在分站覆盖之后调用，主站/分站都覆盖到）
-     * @param array $config
-     * @return array
-     */
     private function translateConfigText(array $config): array
     {
         foreach (self::TRANSLATABLE_CONFIG as $key) {
@@ -48,21 +32,11 @@ abstract class User extends \App\Controller\Base\User
         return $config;
     }
 
-    /**
-     * @param string $title
-     * @param string $template
-     * @param array $data
-     * @return string
-     * @throws ViewException
-     * @throws JSONException
-     */
     protected function render(string $title, string $template, array $data = []): string
     {
         try {
-            //加载helper
             require(BASE_PATH . "/app/View/User/Helper.php");
 
-            //页面标题统一在此翻译，各控制器仍传中文原文
             $data['title'] = lang($title, "tpl");
             $data['app']['version'] = \config("app")['version'];
             $cfg = Config::list();
@@ -72,29 +46,17 @@ abstract class User extends \App\Controller\Base\User
             }
 
             $data['config'] = $this->translateConfigText($data['config']);
-            return View::render('User/' . $template, $data);
+            return View::render('User/' . $template, ViewSafe::escape($data));
         } catch (\SmartyException $e) {
             throw new ViewException($e->getMessage());
         }
     }
 
-    /**
-     * @param string $title
-     * @param string $template
-     * @param string $default
-     * @param array $data
-     * @return string
-     * @throws JSONException
-     * @throws ViewException
-     * @throws \ReflectionException
-     */
     protected function theme(string $title, string $template, string $default, array $data = []): string
     {
         try {
-            //加载helper
             require(BASE_PATH . "/app/View/User/Helper.php");
 
-            //页面标题统一在此翻译，各控制器仍传中文原文
             $data['title'] = lang($title, "tpl");
             $data['app']['version'] = \config("app")['version'];
             $data['favicon'] = "/favicon.ico";
@@ -132,16 +94,17 @@ abstract class User extends \App\Controller\Base\User
                 $theme = $theme ?: "Cartoon";
             }
 
-            //模板静态路径
             $data['static'] = "/app/View/User/Theme/" . $theme;
+            //让 Helper::themeUrl() 跟随这次真正渲染的主题（会员中心可能不是商城主题），否则资源会指到别的主题目录
+            \App\Util\Context::set(\App\Util\Helper::CURRENT_THEME, $theme);
 
             $domain = Client::getDomain();
             $business = Business::query()->where("subdomain", $domain)->first() ?? Business::query()->where("topdomain", $domain)->first();
             if ($business) {
-                $data['isBusinessSite'] = true; //分站域名标记，供主题按主站/分站区分展示（如 Seattle 快捷入口）
+                $data['isBusinessSite'] = true;
                 $data['config']['shop_name'] = $business->shop_name;
                 $data['config']['title'] = $business->title;
-                $data['config']['notice'] = $business->notice;
+                $data['config']['notice'] = RichHtml::sanitize((string)$business->notice, false);
                 $data['config']['service_url'] = $business->service_url != "" ? $business->service_url : "https://wpa.qq.com/msgrd?v=1&uin={$business->service_qq}";
                 if (!$data['from']) {
                     $data['from'] = $business->user_id;
@@ -161,7 +124,6 @@ abstract class User extends \App\Controller\Base\User
             $path = $defaultThemePath . $default;
             $system = true;
 
-            //判断路径是否存在
             if (!empty($config['theme']) && key_exists($template, $config['theme'])) {
                 $path = $themePath . $config['theme'][$template];
                 $system = false;
@@ -179,6 +141,14 @@ abstract class User extends \App\Controller\Base\User
                 $data['setting'] = $config['setting'];
             }
 
+            //语言切换器数据源。**必须以变量形式给模板**，不能让模板去调 lang_menu()：
+            //Smarty 在编译期就校验普通函数是否存在，模板一旦更新到只有旧核心的站点上，
+            //整页会抛 SmartyCompilerException 白屏；而未定义的变量只会渲染成空，最多是
+            //切换器不显示。模板是独立上架、可以先于核心更新的，这个降级路径必须留着。
+            $data['langs'] = \Kernel\Util\Lang::menu();
+
+            $data = ViewSafe::escape($data);
+
             if ($config['info']['RENDER'] == Render::ENGINE_SMARTY || $system) {
                 return View::render($path, $data);
             } elseif ($config['info']['RENDER'] == Render::ENGINE_PHP) {
@@ -186,6 +156,9 @@ abstract class User extends \App\Controller\Base\User
                 require(BASE_PATH . '/app/View/' . $path);
                 $result = ob_get_contents();
                 ob_end_clean();
+                if (\App\Util\Csp::enabled()) {
+                    $result = \App\Util\Csp::injectNonce($result);
+                }
                 hook(\App\Consts\Hook::RENDER_VIEW, $result);
                 return $result;
             }
@@ -195,6 +168,4 @@ abstract class User extends \App\Controller\Base\User
 
         return "";
     }
-
-
 }

@@ -1,13 +1,4 @@
-/*
- * EditorV2 — reusable self-built Markdown editor (CodeMirror source + marked live
- * preview + preview toggle ⇄ ACE HTML-source mode). Storage stays HTML: a hidden
- * <textarea class="text-container" name="..."> always holds the rendered HTML, so
- * save/buyer-render/DB are unchanged. Used by the form widget (type:"editorv2") and
- * standalone editors (e.g. the 店铺公告 notice on the settings page).
- *
- * Globals used at runtime: jQuery ($), i18n, layer, ace, CodeMirror, marked,
- * TurndownService, localStorage.
- */
+
 (function (global) {
     let ev2Seq = 0;
 
@@ -25,9 +16,6 @@
             + tb('table', 'fa-table', '表格');
     }
 
-    // Build the editor markup. The hidden textarea is left EMPTY here (register() sets
-    // its value via .val(), which is HTML-injection-safe) — never interpolate stored
-    // HTML into innerHTML.
     function buildHtml(opt) {
         const name = opt.name;
         const ph = opt.placeholder ?? '';
@@ -45,9 +33,6 @@
             + `</div>`;
     }
 
-    // Wire an existing .ev2-editor. rootEl may be the .ev2-editor itself or an ancestor.
-    // opt: { name, uploadUrl, height, value (initial HTML), onChange(html),
-    //        allowHtmlSource (default true), allowRawHtml (default true) }
     function register(rootEl, opt) {
         opt = opt || {};
         let destroyed = false;
@@ -66,7 +51,6 @@
         const uploadUrl = opt.uploadUrl || '/admin/api/upload/send';
         const allowRawHtml = opt.allowRawHtml !== false;
 
-        // --- converters (store stays HTML: markdown is only the authoring layer) ---
         const escapeHtml = (value) => String(value ?? '')
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -132,6 +116,35 @@
             return t === '' ? '' : String(html);
         };
 
+        // Does this HTML survive HTML -> Markdown -> HTML? Compare "tag@attribute" counts: anything
+        // present before and missing after is formatting markdown cannot carry (inline styles, align,
+        // link targets, image sizes...). DOMParser builds an inert document: no scripts, no image loads.
+        const attrSignature = (html) => {
+            const sig = new Map();
+            const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
+            doc.body.querySelectorAll('*').forEach((el) => {
+                Array.from(el.attributes).forEach((attr) => {
+                    const key = el.tagName.toLowerCase() + '@' + attr.name.toLowerCase();
+                    sig.set(key, (sig.get(key) || 0) + 1);
+                });
+            });
+            return sig;
+        };
+        const markdownLossy = (html) => {
+            if (!html || String(html).trim() === '') return false;
+            try {
+                const before = attrSignature(String(html));
+                if (before.size === 0) return false;
+                const after = attrSignature(md2html(html2md(String(html))));
+                for (const [key, count] of before) {
+                    if ((after.get(key) || 0) < count) return true;
+                }
+            } catch (e) {
+                return false;
+            }
+            return false;
+        };
+
         // --- markdown formatting commands (selection wrap / line prefix / snippet) ---
         const applyCmd = (cm, cmd) => {
             const doc = cm.getDoc();
@@ -185,6 +198,7 @@
         const popupLayer = $editor.closest('.layui-layer').get(0);
         let layoutReady = !popupLayer;
         let layoutTimer = null;
+        let pendingSourceOpen = null;
         const refreshEditor = () => {
             if (!destroyed && cmHost.isConnected) cm.refresh();
         };
@@ -200,6 +214,11 @@
                 layoutTimer = null;
             }
             global.requestAnimationFrame(refreshEditor);
+            if (pendingSourceOpen) {
+                const open = pendingSourceOpen;
+                pendingSourceOpen = null;
+                global.requestAnimationFrame(open);
+            }
         };
 
         if (popupLayer) {
@@ -224,9 +243,15 @@
         togglePh();
 
         // --- live render: markdown -> HTML -> hidden textarea + preview (debounced) ---
+        // The hidden textarea holds the canonical HTML; the markdown in CodeMirror is only a view of it
+        // (turndown). Rendering markdown back is lossy, so the canonical HTML is regenerated only after
+        // the user actually edits the markdown. Opening an item and saving untouched used to re-render
+        // and wipe every inline style (#952). Programmatic setValue (mode switch, setHTML) is not an edit.
+        let mdDirty = false;
         let rid;
         const render = () => {
             if (destroyed) return;
+            if ($editor.attr('data-mode') === 'html') return;
             const src = cm.getValue();
             const html = src.trim() === '' ? '' : md2html(src);
             $textarea.val(html);
@@ -234,7 +259,9 @@
             togglePh();
             opt.onChange && opt.onChange(html);
         };
-        const onMarkdownChange = () => {
+        const onMarkdownChange = (instance, change) => {
+            if (change && change.origin === 'setValue') return;
+            mdDirty = true;
             clearTimeout(rid);
             rid = setTimeout(render, 120);
         };
@@ -323,8 +350,11 @@
             const $btn = $(this);
             if ($btn.attr('data-type') == 0) {
                 $btn.attr('data-type', 1).html('<i class="fa-duotone fa-regular fa-pen-paintbrush me-1"></i>' + i18n('写作'));
-                const html = cm.getValue().trim() === '' ? '' : md2html(cm.getValue());
-                $textarea.val(html);
+                // Untouched markdown: open the canonical HTML as-is instead of a lossy re-render.
+                if (mdDirty) {
+                    clearTimeout(rid);
+                    $textarea.val(cm.getValue().trim() === '' ? '' : md2html(cm.getValue()));
+                }
                 $editor.attr('data-mode', 'html');
                 $body.hide();
                 $prevToggle.hide();
@@ -340,19 +370,51 @@
                     opt.onChange && opt.onChange(h);
                 });
             } else {
-                $btn.attr('data-type', 0).html('<i class="fa-duotone fa-regular fa-code me-1"></i>HTML');
-                const html = $textarea.val();
-                cm.setValue(html.trim() === '' ? '' : html2md(html));
-                $preview.html(html);
-                $('#' + aceId).remove();
-                aceEditor = null;
-                $editor.attr('data-mode', 'md');
-                $body.show();
-                $prevToggle.show();
-                togglePh();
-                queueRefresh();
+                const toWriting = () => {
+                    $btn.attr('data-type', 0).html('<i class="fa-duotone fa-regular fa-code me-1"></i>HTML');
+                    const html = $textarea.val();
+                    // The HTML edited in source mode stays canonical until the markdown is edited.
+                    mdDirty = false;
+                    cm.setValue(html.trim() === '' ? '' : html2md(html));
+                    $preview.html(allowRawHtml ? html : sanitizePreview(html));
+                    $('#' + aceId).remove();
+                    aceEditor = null;
+                    $editor.attr('data-mode', 'md');
+                    $editor.find('.ev2-note').remove();
+                    $body.show();
+                    $prevToggle.show();
+                    togglePh();
+                    queueRefresh();
+                };
+                if (!markdownLossy($textarea.val())) {
+                    toWriting();
+                    return;
+                }
+                layer.confirm(i18n('写作模式保留不了这些排版（行内样式、对齐、新窗口打开等），在写作模式里修改并保存后会丢失。仍要切换吗？'), {
+                    title: i18n('切换到写作模式'),
+                    btn: [i18n('切换'), i18n('取消')]
+                }, (index) => {
+                    layer.close(index);
+                    toWriting();
+                });
             }
         });
+
+        // HTML that markdown cannot carry (inline styles, align, link targets, image sizes...) opens in
+        // HTML source mode, so fixing one typo in writing mode cannot wipe the whole layout on save (#952).
+        // Deferred until the popup's entrance animation settles: ACE measures glyphs when it is created.
+        if ($modeToggle.length && typeof global.ace !== 'undefined' && markdownLossy(seedHtml)) {
+            const openSource = () => {
+                if (destroyed || $modeToggle.attr('data-type') != 0) return;
+                $modeToggle.trigger('click');
+                $editor.find('.ev2-bar').after(`<div class="ev2-note" style="padding:6px 12px;font-size:12px;line-height:1.6;opacity:.75;border-bottom:1px solid rgba(127,127,127,.18);">${i18n('内容含写作模式保留不了的排版（行内样式等），已用 HTML 源码模式打开')}</div>`);
+            };
+            if (layoutReady) {
+                openSource();
+            } else {
+                pendingSourceOpen = openSource;
+            }
+        }
 
         // --- CodeMirror mis-measures while hidden (layui tab / collapsed panel): refresh on reveal ---
         let intersectionObserver = null;
@@ -402,10 +464,26 @@
             getHTML: () => {
                 if (destroyed) return $textarea.val();
                 clearTimeout(rid);
-                render();
+                if (aceEditor) {
+                    $textarea.val(aceEditor.getValue());
+                    return $textarea.val();
+                }
+                // Untouched markdown: submit the canonical HTML byte-for-byte (#952). Editors that
+                // forbid raw HTML (tickets) keep always re-rendering, so their output stays sanitized.
+                if (mdDirty || !allowRawHtml) render();
                 return $textarea.val();
             },
-            setHTML: (h) => { if (!destroyed) cm.setValue((h && normalizeDefault(h)) ? html2md(h) : ''); },
+            setHTML: (h) => {
+                if (destroyed) return;
+                const html = normalizeDefault(h ?? '');
+                $textarea.val(html);
+                $preview.html(allowRawHtml ? html : sanitizePreview(html));
+                mdDirty = false;
+                clearTimeout(rid);
+                if (aceEditor) aceEditor.setValue(html, -1);
+                cm.setValue(html ? html2md(html) : '');
+                togglePh();
+            },
             destroy: destroy
         };
     }

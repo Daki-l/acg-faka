@@ -42,6 +42,20 @@ let acg = {
     }, loadScript(url, callback = null) {
         let _script = document.createElement('script');
         _script.setAttribute('type', 'text/javascript');
+        //带上版本号：这里加载的 layer.js / clipboard.js 原先没有任何缓存串，
+        //改了库文件老用户的浏览器会一直用旧副本（layer 的关闭按钮就因此长期留着
+        //href="javascript:;"，CSP 强制模式下每关一次弹窗报一条）。版本号取自
+        //本文件自己的 ?v=，跟着发版走，取不到就退回原样、不影响加载。
+        try {
+            if (url.indexOf('?') === -1) {
+                let self = document.querySelector('script[src*="/assets/static/acg.js"]');
+                let v = self && (self.getAttribute('src').split('v=')[1] || '').split('&')[0];
+                if (v) {
+                    url += '?v=' + v;
+                }
+            }
+        } catch (e) {
+        }
         _script.setAttribute('src', url);
         document.getElementsByTagName('head')[0].appendChild(_script);
         if (this.property.Browser.ie) {
@@ -390,7 +404,7 @@ let acg = {
                     if (prev <= 1) {
                         prev = 1;
                     }
-                    $(instance).html('<table><tbody class="draftCard"></tbody></table> <div style="margin-top: 5px;" class="page-button"><button ' + (res.current_page <= 1 ? 'disabled' : '') + ' type="button" onclick="acg.API.draftCardPerform(\'' + instance + '\',' + commodityId + ',' + prev + ',\'' + draft_premium + '\')">' + acgT("上一组") + '</button> <button ' + (res.current_page >= res.last_page ? 'disabled' : '') + ' type="button" onclick="acg.API.draftCardPerform(\'' + instance + '\',' + commodityId + ',' + next + ',\'' + draft_premium + '\')">' + acgT("下一组") + '</button></div>');
+                    $(instance).html('<table><tbody class="draftCard"></tbody></table> <div style="margin-top: 5px;" class="page-button"><button ' + (res.current_page <= 1 ? 'disabled' : '') + ' type="button" data-acg-action="acg.API.draftCardPerform" data-acg-args=\'["' + instance + '",' + commodityId + ',' + prev + ',"' + draft_premium + '"]\'>' + acgT("上一组") + '</button> <button ' + (res.current_page >= res.last_page ? 'disabled' : '') + ' type="button" data-acg-action="acg.API.draftCardPerform" data-acg-args=\'["' + instance + '",' + commodityId + ',' + next + ',"' + draft_premium + '"]\'>' + acgT("下一组") + '</button></div>');
                 }, success: item => {
                     let premium = 0;
 
@@ -402,7 +416,7 @@ let acg = {
                         premium = item.draft_premium;
                     }
 
-                    $(instance).find(".draftCard").append('<tr><td><label><input type="checkbox" onchange="acg.API.draftCardCheckbox(this)" name="card_id" value="' + item.id + '"> ' + item.draft + (premium > 0 ? `<span class="card-premium">+${acgCurrencySymbol()}${premium}</span>` : '') + '</label></td></tr>');
+                    $(instance).find(".draftCard").append('<tr><td><label><input type="checkbox" data-acg-change="acg.API.draftCardCheckbox" name="card_id" value="' + item.id + '"> ' + item.draft + (premium > 0 ? `<span class="card-premium">+${acgCurrencySymbol()}${premium}</span>` : '') + '</label></td></tr>');
                 }
             });
         }, draftCardCheckbox(obj) {
@@ -886,7 +900,7 @@ function acgSecretPopup(res) {
             '.acg-secret__note-title{display:flex;align-items:center;gap:6px;font-size:12px;opacity:.7;margin-bottom:6px;}' +
             '.acg-secret__note-title svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:2;' +
             'stroke-linecap:round;stroke-linejoin:round;}' +
-            '.acg-secret__note-body{font-size:13px;line-height:1.75;word-break:break-word;max-height:180px;overflow:auto;}' +
+            '.acg-secret__note-body{font-size:13px;line-height:1.75;white-space:pre-line;word-break:break-word;max-height:180px;overflow:auto;}' +
             '.acg-secret__note-body p:last-child{margin-bottom:0;}';
         document.head.appendChild(st);
     }
@@ -955,3 +969,6 @@ function fallbackCopy(text, done) {
     document.body.removeChild(ta);
 }
 
+//acg 是 let 声明的，只存在于全局词法环境。旧的内联 onclick 顺作用域链能找到它，
+//改成声明式绑定后由外部脚本从 window 逐级解析，找不到就静默失效，这里显式挂出去。
+window.acg = acg;

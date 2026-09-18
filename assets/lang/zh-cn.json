@@ -3433,6 +3433,14 @@
     "scene": "js",
     "count": 1
   },
+  "发件人邮箱": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "发件人邮箱格式不正确": {
+    "scene": "api",
+    "count": 1
+  },
   "发布应用": {
     "scene": "js",
     "count": 1
@@ -10792,6 +10800,10 @@
     "scene": "js",
     "count": 1
   },
+  "留空则与用户名相同": {
+    "scene": "tpl",
+    "count": 1
+  },
   "留空则保留现有 AccessKeyId": {
     "scene": "tpl",
     "count": 1
@@ -15267,6 +15279,10 @@
     "scene": "api",
     "count": 1
   },
+  "部分SMTP服务商的登录用户名与发件邮箱不同，此处填写实际的发件邮箱地址。": {
+    "scene": "tpl",
+    "count": 1
+  },
   "部分优惠卷不存在，请刷新后重试": {
     "scene": "api",
     "count": 1
@@ -15967,5 +15983,261 @@
   "，获取更多折扣！": {
     "scene": "tpl",
     "count": 2
+  },
+  "本月": {
+    "scene": "tpl",
+    "count": 5
+  },
+  "推广佣金": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "成交订单": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "新开分站": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "利润": {
+    "scene": "tpl",
+    "count": 12
+  },
+  "今日利润": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "昨日利润": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "本月利润": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "趋势": {
+    "scene": "tpl",
+    "count": 4
+  },
+  "时间范围": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "7 天": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "30 天": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "指标": {
+    "scene": "tpl",
+    "count": 2
+  },
+  "成交额": {
+    "scene": "tpl",
+    "count": 4
+  },
+  "统计周期": {
+    "scene": "tpl",
+    "count": 2
+  },
+  "利润构成": {
+    "scene": "tpl",
+    "count": 2
+  },
+  "支付手续费": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "商户分成": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "分站分成": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "客单价": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "新增会员": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "兑现到余额": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "待处理": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "持平": {
+    "scene": "js",
+    "count": 1
+  },
+  "成交额 {amount} · {count} 单": {
+    "scene": "js",
+    "count": 2
+  },
+  "上月 {amount}": {
+    "scene": "js",
+    "count": 1
+  },
+  "待审核提现": {
+    "scene": "js",
+    "count": 1
+  },
+  "需站长审核": {
+    "scene": "js",
+    "count": 1
+  },
+  "待发货订单": {
+    "scene": "js",
+    "count": 1
+  },
+  "待回复工单": {
+    "scene": "js",
+    "count": 1
+  },
+  "数据加载失败，请重试": {
+    "scene": "js",
+    "count": 3
+  },
+  "网络异常，数据加载失败": {
+    "scene": "js",
+    "count": 1
+  },
+  "亏损": {
+    "scene": "js",
+    "count": 4
+  },
+  "含商户商品抽成 {amount}": {
+    "scene": "js",
+    "count": 1
+  },
+  "较昨日同时段": {
+    "scene": "js",
+    "count": 1
+  },
+  "较前日": {
+    "scene": "js",
+    "count": 1
+  },
+  "较上月同期": {
+    "scene": "js",
+    "count": 1
+  },
+  "上升": {
+    "scene": "js",
+    "count": 1
+  },
+  "下降": {
+    "scene": "js",
+    "count": 2
+  },
+  "支付通道": {
+    "scene": "tpl",
+    "count": 2
+  },
+  "暂无收款": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "已删除的通道": {
+    "scene": "js",
+    "count": 1
+  },
+  "{count} 笔": {
+    "scene": "js",
+    "count": 1
+  },
+  "全部时间": {
+    "scene": "js",
+    "count": 1
+  },
+  "未付款 {count} 单": {
+    "scene": "js",
+    "count": 1
+  },
+  "利润率 {rate}": {
+    "scene": "js",
+    "count": 1
+  },
+  "付款人数 {count}": {
+    "scene": "js",
+    "count": 1
+  },
+  "人均消费 {amount}": {
+    "scene": "js",
+    "count": 1
+  },
+  "订单 {order} · 充值 {recharge}": {
+    "scene": "js",
+    "count": 1
+  },
+  "网关 {amount}": {
+    "scene": "js",
+    "count": 2
+  },
+  "在线支付 {online} · 余额 {balance}": {
+    "scene": "js",
+    "count": 1
+  },
+  "会员与提现": {
+    "scene": "tpl",
+    "count": 1
+  },
+  "其余 {count} 个通道": {
+    "scene": "js",
+    "count": 1
+  },
+  "个种类价": {
+    "scene": "js",
+    "count": 1
+  },
+  "种类价不变：": {
+    "scene": "js",
+    "count": 1
+  },
+  "种类商品按所选种类计价，单价不参与加价": {
+    "scene": "js",
+    "count": 1
+  },
+  "该商品不支持使用优惠券": {
+    "scene": "api",
+    "count": 1
+  },
+  "商品价格已变动，请刷新页面后重新下单": {
+    "scene": "api",
+    "count": 1
+  },
+  "商品价格配置异常，暂时无法下单，请联系商家": {
+    "scene": "api",
+    "count": 1
+  },
+  "写作模式保留不了这些排版（行内样式、对齐、新窗口打开等），在写作模式里修改并保存后会丢失。仍要切换吗？": {
+    "scene": "js",
+    "count": 1
+  },
+  "切换到写作模式": {
+    "scene": "js",
+    "count": 1
+  },
+  "切换": {
+    "scene": "js",
+    "count": 1
+  },
+  "内容含写作模式保留不了的排版（行内样式等），已用 HTML 源码模式打开": {
+    "scene": "js",
+    "count": 1
+  },
+  "兑现操作过于频繁，请稍后再试": {
+    "scene": "api",
+    "count": 1
   }
 }

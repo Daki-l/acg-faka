@@ -23,7 +23,7 @@
                 <!--begin::Content-->
                 <div id="kt_account_profile_details" class="collapse show">
                     <!--begin::Form-->
-                    <form id="data-form" class="form" data-admin-mobile-settings-page="other">
+                    <form id="data-form" method="post" class="form" data-admin-mobile-settings-page="other">
                         <nav class="admin-mobile-settings-nav" aria-label="#{t('其他设置分区')}">
                             <a href="#mobile-other-domain">#{t("域名与主站")}</a>
                             <a href="#mobile-other-currency">#{t("货币")}</a>
@@ -41,7 +41,7 @@
                             <div class="row mb-6">
                                 <!--begin::Label-->
                                 <label class="col-lg-4 col-form-label fw-bold fs-6">#{t("自定义支付回调域名(")}<a
-                                            href="https://faka.wiki/#/zh-cn/setting-other" target="_blank" style="color: red;">#{t("详细教程")}</a>)</label>
+                                            href="https://faka.wiki/zh-cn/guide/settings.html#自定义支付回调域名" target="_blank" style="color: red;">#{t("详细教程")}</a>)</label>
                                 <!--end::Label-->
                                 <!--begin::Col-->
                                 <div class="col-lg-8 fv-row">
@@ -509,7 +509,7 @@
                                         <option value="recommend" #{if $config.default_category == "recommend"} selected #{/if}>#{t("推荐")}
                                         </option>
                                         #{foreach $category as $cate}
-                                            <option value="#{$cate.id|escape:'html'}" #{if $config.default_category == $cate.id} selected #{/if}>#{$cate.name|escape:'html'}</option>
+                                            <option value="#{$cate.id|escape:'html'}" #{if $config.default_category == $cate.id} selected #{/if}>#{$cate.name|strip_tags|strip|escape:'html'}</option>
                                         #{/foreach}
                                     </select>
                                     <!--end::Input-->

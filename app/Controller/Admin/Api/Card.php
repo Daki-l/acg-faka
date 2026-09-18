@@ -286,23 +286,42 @@ class Card extends Manage
             throw new JSONException("商品不存在");
         }
 
-        $list = \App\Model\Card::query()
+        $groups = \App\Model\Card::query()
             ->where("commodity_id", $commodityId)
             ->selectRaw("race, sku, sum(case when status = 0 then 1 else 0 end) as unsold, sum(case when status = 2 then 1 else 0 end) as locked, sum(case when status = 1 then 1 else 0 end) as sold, count(*) as total")
             ->groupBy(["race", "sku"])
             ->orderBy("race")
-            ->get()
-            ->map(fn($item) => [
-                "race" => $item->race,
-                "sku" => $item->sku,
-                "unsold" => (int)$item->unsold,
-                "locked" => (int)$item->locked,
-                "sold" => (int)$item->sold,
-                "total" => (int)$item->total,
-            ])
-            ->toArray();
+            ->get();
 
-        return $this->json(data: ["name" => strip_tags((string)$commodity->name), "list" => $list]);
+        // 只保留仍存在于商品「当前」SKU 配置里的组合，并按规范化签名归并——
+        // 卡密表会沉淀历史用过的 race/sku（规格改名或删除后旧卡仍在），直接按卡密分组
+        // 会把废弃规格也列出来、且同一规格因 JSON 键序不同出现重复项（issue #898）。
+        $config = \App\Util\Sku::configArray($commodity->config);
+        $merged = [];
+        foreach ($groups as $item) {
+            if (!\App\Util\Sku::comboExists($config, $item->race, $item->sku)) {
+                continue;
+            }
+            $sig = \App\Util\Sku::signature($item->race, $item->sku);
+            if (!isset($merged[$sig])) {
+                $skuArr = \App\Util\Sku::toArray($item->sku);
+                ksort($skuArr);
+                $merged[$sig] = [
+                    "race" => $item->race,
+                    "sku" => $skuArr,
+                    "unsold" => 0,
+                    "locked" => 0,
+                    "sold" => 0,
+                    "total" => 0,
+                ];
+            }
+            $merged[$sig]["unsold"] += (int)$item->unsold;
+            $merged[$sig]["locked"] += (int)$item->locked;
+            $merged[$sig]["sold"] += (int)$item->sold;
+            $merged[$sig]["total"] += (int)$item->total;
+        }
+
+        return $this->json(data: ["name" => strip_tags((string)$commodity->name), "list" => array_values($merged)]);
     }
 
 
@@ -412,6 +431,11 @@ class Card extends Manage
         }
 
 
+        if ($success > 0) {
+            $ebIds = [$commodityId];
+            $ebReason = 'import';
+            hook(\App\Consts\Hook::CARD_CHANGE_AFTER, $ebIds, $ebReason);
+        }
         ManageLog::log($this->getManage(), "[导入卡密]共计导入:{$count}张卡密，成功:{$success}张，失败：{$error}张");
         return $this->json(200, "共计导入:{$count}张卡密，成功:{$success}张，失败：{$error}张");
     }
@@ -470,6 +494,9 @@ class Card extends Manage
         if (!$card->save()) {
             throw new JSONException('保存失败');
         }
+        $ebIds = [(int)$card->commodity_id];
+        $ebReason = 'edit';
+        hook(\App\Consts\Hook::CARD_CHANGE_AFTER, $ebIds, $ebReason);
         ManageLog::log($this->getManage(), "[修改卡密]编辑了卡密信息");
         return $this->json(200, '（＾∀＾）保存成功');
     }
@@ -484,6 +511,11 @@ class Card extends Manage
             throw new JSONException('请至少选择一张卡密');
         }
         $count = \App\Model\Card::query()->whereIn('id', $list)->where('status', 0)->update(['status' => 2]);
+        if ($count > 0) {
+            $ebIds = self::commodityIdsOfCards($list);
+            $ebReason = 'lock';
+            hook(\App\Consts\Hook::CARD_CHANGE_AFTER, $ebIds, $ebReason);
+        }
         ManageLog::log($this->getManage(), "[锁定卡密]批量锁定卡密，共计：{$count}");
         return $this->json(200, $count > 0 ? '锁定成功' : '没有可锁定的卡密', ['count' => $count]);
     }
@@ -498,6 +530,11 @@ class Card extends Manage
             throw new JSONException('请至少选择一张卡密');
         }
         $count = \App\Model\Card::query()->whereIn('id', $list)->where('status', 2)->update(['status' => 0]);
+        if ($count > 0) {
+            $ebIds = self::commodityIdsOfCards($list);
+            $ebReason = 'unlock';
+            hook(\App\Consts\Hook::CARD_CHANGE_AFTER, $ebIds, $ebReason);
+        }
         ManageLog::log($this->getManage(), "[解锁卡密]批量解锁卡密，共计：{$count}");
         return $this->json(200, $count > 0 ? '解锁成功' : '没有可解锁的卡密', ['count' => $count]);
     }
@@ -528,8 +565,37 @@ class Card extends Manage
                 'purchase_time' => Date::current(),
             ]);
         });
+        if ($count > 0) {
+            $ebIds = self::commodityIdsOfCards($list);
+            $ebReason = 'sell';
+            hook(\App\Consts\Hook::CARD_CHANGE_AFTER, $ebIds, $ebReason);
+        }
         ManageLog::log($this->getManage(), "[出售卡密]手动标记已出售，共计：{$count}");
         return $this->json(200, '操作成功', ['count' => $count]);
+    }
+
+    /**
+     * 卡密 id -> 受影响的商品 id（去重）。
+     *
+     * 供 CARD_CHANGE_AFTER 钩子取参用：订阅方关心的是哪个商品的库存动了，
+     * 卡密 id 对它没有意义。删除路径必须在事务之前调用，否则行已经没了。
+     *
+     * @param int[] $cardIds
+     * @return int[]
+     */
+    private static function commodityIdsOfCards(array $cardIds): array
+    {
+        if ($cardIds === []) {
+            return [];
+        }
+        return \App\Model\Card::query()
+            ->whereIn('id', $cardIds)
+            ->distinct()
+            ->pluck('commodity_id')
+            ->map(static fn($id): int => (int)$id)
+            ->filter(static fn(int $id): bool => $id > 0)
+            ->values()
+            ->all();
     }
 
     /**
@@ -539,6 +605,8 @@ class Card extends Manage
     public function del(): array
     {
         $requestedIds = $this->cardIds($_POST['list'] ?? []);
+        //卡密行在事务里就没了，受影响的商品 id 必须提前取
+        $affectedCommodityIds = self::commodityIdsOfCards($requestedIds);
         $impact = DB::transaction(function () use ($requestedIds): array {
             $impact = $this->cardDeleteImpact($requestedIds, true);
             if (count($requestedIds) === 1 && $impact['blocked_count'] > 0) {
@@ -568,6 +636,10 @@ class Card extends Manage
         });
 
         $deletedCount = $impact['deleted_count'];
+        if ($deletedCount > 0 && $affectedCommodityIds !== []) {
+            $ebReason = 'delete';
+            hook(\App\Consts\Hook::CARD_CHANGE_AFTER, $affectedCommodityIds, $ebReason);
+        }
         $skippedCount = $impact['blocked_count'];
         $operation = count($requestedIds) > 1 ? '批量删除' : '删除';
         ManageLog::log(

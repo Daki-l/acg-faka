@@ -3,12 +3,12 @@ declare(strict_types=1);
 
 namespace App\Service\Bind;
 
-
 use App\Model\Commodity;
 use App\Model\PriceTemplate;
 use App\Util\Http;
 use App\Util\Ini;
 use App\Util\SharedCurrency;
+use App\Util\SharedPayload;
 use App\Util\Str;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
@@ -19,18 +19,9 @@ use Kernel\Util\Decimal;
 
 class Shared implements \App\Service\Shared
 {
-
     #[Inject]
     private Client $http;
 
-    /**
-     * @param string $url
-     * @param string $appId
-     * @param string $appKey
-     * @param array $data
-     * @return array
-     * @throws JSONException
-     */
     public function mcyRequest(string $url, string $appId, string $appKey, array $data = []): array
     {
         try {
@@ -41,9 +32,7 @@ class Shared implements \App\Service\Shared
                 ],
                 "form_params" => $data,
                 "timeout" => 30,
-                // A redirect to another host must never receive the signed
-                // request headers. The configured endpoint has to answer
-                // directly; operators can update the saved base URL instead.
+
                 'allow_redirects' => false,
             ]);
 
@@ -63,17 +52,24 @@ class Shared implements \App\Service\Shared
         }
     }
 
+    private function post(string $url, string $appId, string $appKey, array $data = []): array
+    {
+        return (array)$this->request($url, $appId, $appKey, $data, false);
+    }
 
     /**
-     * @param string $url
-     * @param string $appId
-     * @param string $appKey
-     * @param array $data
-     * @return array
-     * @throws GuzzleException
-     * @throws JSONException
+     * 和 post() 一样，但**端点不存在时返回 null 而不是抛异常**。
+     *
+     * `stock` / `draft` / `valuation` 是 3.1.2 之后才有的接口，对着老上游打过去只会拿到
+     * 一张 404 页面。调用方据此降级到老协议的等价做法。只认 404/405——其它状态码、
+     * 超时、连不上都照旧报错，绝不把「对方挂了」当成「对方是老版本」。
      */
-    private function post(string $url, string $appId, string $appKey, array $data = []): array
+    private function postOptional(string $url, string $appId, string $appKey, array $data = []): ?array
+    {
+        return $this->request($url, $appId, $appKey, $data, true);
+    }
+
+    private function request(string $url, string $appId, string $appKey, array $data, bool $optional): ?array
     {
         $data = array_merge($data, ["app_id" => $appId, "app_key" => $appKey]);
         $data['sign'] = Str::generateSignature($data, $appKey);
@@ -81,32 +77,91 @@ class Shared implements \App\Service\Shared
             $response = Http::make()->post($url, [
                 'form_params' => $data,
                 'timeout' => 30,
-                // app_key is part of this legacy request body. Disabling all
-                // redirects prevents a 307/308 response from forwarding that
-                // body to a different origin.
+
                 'allow_redirects' => false,
             ]);
         } catch (\Exception $e) {
-            throw new JSONException("连接失败, 疑似被对方防火墙拦截");
+            if ($optional
+                && $e instanceof \GuzzleHttp\Exception\BadResponseException
+                && in_array($e->getResponse()->getStatusCode(), [404, 405], true)) {
+                return null;
+            }
+            //「对方」这个说法本身就是转售身份的暗示——它会出现在免登录的商品详情页上。
+            //站长自己操作时保留原文，其余场合只给通用文案。
+            throw new JSONException(SharedPayload::guardMessage(
+                "连接失败, 疑似被对方防火墙拦截",
+                "商品暂时无法购买，请稍后重试"
+            ));
         }
         $contents = $response->getBody()->getContents();
 
         $result = json_decode($contents, true);
-        if ($result['code'] != 200) {
-            throw new JSONException(strip_tags((string)$result['msg']) ?: "连接失败");
+        if (!is_array($result) || ($result['code'] ?? null) != 200) {
+            //上游的报错文本会一路冒泡出去：syncRemoteItem 跑在**免登录的商品详情页**上，
+            //下单失败则原样回给下游。上游常在 msg 里写自己的站名、域名和充值地址，
+            //那就是转售身份。出站前抹掉地址类标识，原文进日志；站长在后台操作时保留原文。
+            throw new JSONException(SharedPayload::upstreamError($result['msg'] ?? null) ?: "连接失败");
         }
         return (array)$result['data'];
     }
 
+    /** 上游协议代次：还没探明 */
+    public const PROTOCOL_UNKNOWN = 0;
+
+    /** 上游协议代次：3.1.2 及以后（item 收 code 返回单商品，有 stock/draft/valuation） */
+    public const PROTOCOL_MODERN = 1;
+
+    /** 上游协议代次：3.1.1 及更老（item 收 sharedCode 返回分类树，没有 stock/draft/valuation） */
+    public const PROTOCOL_LEGACY = 2;
+
     /**
-     * @param string $domain
-     * @param string $appId
-     * @param string $appKey
-     * @param int $type
-     * @return array|null
-     * @throws GuzzleException
-     * @throws JSONException
+     * 这家上游是哪一代协议。老库没有 protocol 列时读到 null，按「未探明」处理——
+     * 未探明不是老版本，只是还没问过，走的仍是先试新端点的路。
      */
+    private function protocolOf(\App\Model\Shared $shared): int
+    {
+        $value = (int)($shared->protocol ?? self::PROTOCOL_UNKNOWN);
+        return in_array($value, [self::PROTOCOL_MODERN, self::PROTOCOL_LEGACY], true)
+            ? $value
+            : self::PROTOCOL_UNKNOWN;
+    }
+
+    /**
+     * 记住探明的代次。**先写内存再写库**：同一个请求里后续的调用立刻少一次空探测，
+     * 就算补列失败（数据库账号没有 ALTER 权限）本次请求也不白探。
+     */
+    private function rememberProtocol(\App\Model\Shared $shared, int $protocol): void
+    {
+        if ($this->protocolOf($shared) === $protocol) {
+            return;
+        }
+
+        $shared->protocol = $protocol;
+
+        if ((int)$shared->id <= 0) {
+            return;
+        }
+
+        try {
+            \App\Util\Schema::ensureSharedProtocol();
+            \App\Model\Shared::query()->whereKey((int)$shared->id)->update(['protocol' => $protocol]);
+        } catch (\Throwable $e) {
+            //记不住只是每次都要多探一次，不影响功能
+        }
+    }
+
+    /**
+     * 老协议的 inventory：**两代都认这个接口、且入参名都叫 sharedCode**，
+     * 所以它是老上游那边唯一还能问出「库存 + 拿货价」的地方。
+     */
+    private function legacyInventory(\App\Model\Shared $shared, string $code, ?string $race = null): array
+    {
+        return $this->post($shared->domain . "/shared/commodity/inventory", $shared->app_id, $shared->app_key, [
+            "sharedCode" => $code,
+            "race" => (string)$race
+        ]);
+    }
+
     public function connect(string $domain, string $appId, string $appKey, int $type = 0): ?array
     {
         if ($type == 1) {
@@ -118,10 +173,6 @@ class Shared implements \App\Service\Shared
         return $this->post($domain . "/shared/authentication/connect", $appId, $appKey);
     }
 
-    /**
-     * @param array $item
-     * @return array
-     */
     private function createV4Item(array $item): array
     {
         $arr = [
@@ -142,7 +193,7 @@ class Shared implements \App\Service\Shared
             'inventory_hidden' => 0,
             'only_user' => 0,
             'purchase_count' => 0,
-            'minimum' => 0, //最低购买，
+            'minimum' => 0,
             'maximum' => 0
         ];
 
@@ -182,16 +233,8 @@ class Shared implements \App\Service\Shared
         return $arr;
     }
 
-    /**
-     * @param \App\Model\Shared $shared
-     * @return array|null
-     * @throws GuzzleException
-     * @throws JSONException
-     */
     public function items(\App\Model\Shared $shared): ?array
     {
-        //跨币种换算系数在拉取前解析：配置不完整（选了无法自动换算的货币又没填汇率）
-        //要在这里就报错，绝不能把未换算的价格当本站货币放出去
         $factor = SharedCurrency::factor($shared);
 
         if ($shared->type == 1) {
@@ -219,12 +262,53 @@ class Shared implements \App\Service\Shared
     }
 
     /**
-     * @param \App\Model\Shared $shared
-     * @param string $code
-     * @return array
-     * @throws GuzzleException
-     * @throws JSONException
+     * 老版本的 `/shared/commodity/item` 与今天不是同一个接口。**3.1.1 及以前**：
+     *   - 入参叫 `sharedCode`，不是 `code`；
+     *   - 返回的是**分类树**（那时的 `item()` 实为 `getItems($sharedCode)`），
+     *     3.1.2 起才改成返回单个商品对象。
+     *
+     * 而 `items()` 的形状从头到尾没变过，于是「新版本对接老版本」的表现很有迷惑性：
+     * **货源列表拉得到、点接入全部失败**，报错是 `远端商品字段 name 内容不正确`——
+     * 树被当成一个商品去读，`name` 自然不存在。
+     *
+     * 这里按**形状**识别，两种口径都收。入参那头在调用点两个名字一起发：各版本只认
+     * 自己那个、多出来的忽略；签名是收发两侧各自按收到的全量字段现算的，多带一个
+     * 字段不影响验签。
      */
+    private function unwrapRemoteItem(array $data, string $code): array
+    {
+        //新口径：已经是单个商品
+        if (array_key_exists('name', $data) || array_key_exists('price', $data)) {
+            return $data;
+        }
+
+        $flat = [];
+        foreach ($data as $group) {
+            if (!is_array($group) || !is_array($group['children'] ?? null)) {
+                continue;
+            }
+            foreach ($group['children'] as $child) {
+                if (!is_array($child)) {
+                    continue;
+                }
+                //老版本的 getItems($code) 已经按 code 过滤过了，这里仍然按 code 认人：
+                //万一对方没过滤，取「第一个」就会静默接错商品——那比报错难查得多
+                if ((string)($child['code'] ?? '') === $code || (string)($child['id'] ?? '') === $code) {
+                    return $child;
+                }
+                $flat[] = $child;
+            }
+        }
+
+        //没有 code 可比对（更老的树里商品行不带 code）但整棵树就一个商品：那它必然是要找的那个
+        if (count($flat) === 1) {
+            return $flat[0];
+        }
+
+        //认不出来就原样退回，让调用方按自己的口径报错——这里不猜
+        return $data;
+    }
+
     public function item(\App\Model\Shared $shared, string $code): array
     {
         $factor = SharedCurrency::factor($shared);
@@ -244,24 +328,46 @@ class Shared implements \App\Service\Shared
                 "code" => $code
             ]);
 
-            if (!isset($a[0]['children'][0])) {
-                throw new JSONException("商品不存在#{$code}");
+            //SharedStock 协议返回的就是一棵树，与老版本 item() 同形，识别逻辑共用一份。
+            //原来盲取第一个 child，对方没按 code 过滤时会静默接错商品。
+            $b = $this->unwrapRemoteItem($a, $code);
+            //这棵树的行同样是上游自己的成本列（老版 SharedStock 整行出站），不是拿货价
+            unset($b['factory_price']);
+
+            if (!array_key_exists('name', $b) && !array_key_exists('price', $b)) {
+                //$code 是**上游的商品编号**：这条异常会出现在免登录的商品详情页和
+                //下游的接口响应里，把编号原样打出去等于把上游的货架指给别人看。
+                throw new JSONException(SharedPayload::guardMessage(
+                    "商品不存在#{$code}",
+                    "商品暂时无法购买，请稍后重试"
+                ));
             }
 
-            $b = $a[0]['children'][0];
-
-            if (!is_array($b['config'])) {
+            if (isset($b['config']) && !is_array($b['config'])) {
                 $b['config'] = Ini::toArray((string)$b['config']);
             }
 
             return SharedCurrency::item($b, $factor);
         }
-        $a = $this->post($shared->domain . "/shared/commodity/item", $shared->app_id, $shared->app_key, [
-            "code" => $code
+        $raw = $this->post($shared->domain . "/shared/commodity/item", $shared->app_id, $shared->app_key, [
+            "code" => $code,
+            //3.1.1 及以前读的是 sharedCode，两个一起发，新旧上游各取所需
+            "sharedCode" => $code
         ]);
 
-        //原生店铺返回的config是INI字符串，统一转成数组与type 1/2保持一致：
-        //下游同步处会把config传给Ini::toConfig(array)，传字符串会直接TypeError
+        $a = $this->unwrapRemoteItem($raw, $code);
+
+        //响应形状就是协议代次的**免费探针**：树 = ≤3.1.1，单商品 = 3.1.2+。
+        //认不出形状时什么都不记——宁可下次多探一次，也不能记错代次去走死路。
+        if ($a !== $raw) {
+            //≤3.1.1 的 item() 实为整行 toArray 的分类树：这里的 factory_price 是**上游自己的成本列**，
+            //不是它按我们身份算出来的拿货价，不能当进货成本用。拿掉后 remoteCost() 会改问 inventory()。
+            unset($a['factory_price']);
+            $this->rememberProtocol($shared, self::PROTOCOL_LEGACY);
+        } elseif (array_key_exists('name', $raw) || array_key_exists('price', $raw)) {
+            $this->rememberProtocol($shared, self::PROTOCOL_MODERN);
+        }
+
         if (isset($a['config']) && !is_array($a['config'])) {
             $a['config'] = Ini::toArray((string)$a['config']);
         }
@@ -269,20 +375,8 @@ class Shared implements \App\Service\Shared
         return SharedCurrency::item($a, $factor);
     }
 
-
-    /**
-     * @param \App\Model\Shared $shared
-     * @param Commodity $commodity
-     * @param int $cardId
-     * @param int $num
-     * @param string $race
-     * @return bool
-     * @throws GuzzleException
-     * @throws JSONException
-     */
     public function inventoryState(\App\Model\Shared $shared, Commodity $commodity, int $cardId, int $num, string $race): bool
     {
-
         if ($shared->type == 1) {
             $config = Ini::toArray($commodity->config);
             $data = $this->mcyRequest($shared->domain . "/plugin/open-api/sku/state", $shared->app_id, $shared->app_key, [
@@ -302,27 +396,9 @@ class Shared implements \App\Service\Shared
         return true;
     }
 
-    /**
-     * @param \App\Model\Shared $shared
-     * @param Commodity $commodity
-     * @param string $contact
-     * @param int $num
-     * @param int $cardId
-     * @param int $device
-     * @param string $password
-     * @param string $race
-     * @param array|null $sku
-     * @param string|null $widget
-     * @param string $requestNo
-     * @return string
-     * @throws GuzzleException
-     * @throws JSONException
-     * @throws \ReflectionException
-     */
     public function trade(\App\Model\Shared $shared, Commodity $commodity, string $contact, int $num, int $cardId, int $device, string $password, string $race, ?array $sku, ?string $widget, string $requestNo): string
     {
         $wg = (array)json_decode((string)$widget, true);
-
 
         if ($shared->type == 1) {
             $config = Ini::toArray($commodity->config);
@@ -359,59 +435,103 @@ class Shared implements \App\Service\Shared
 
         $trade = $this->post($shared->domain . "/shared/commodity/trade", $shared->app_id, $shared->app_key, $post);
 
-        /**
-         * 更新缓存库存
-         * @var \App\Service\Shop $shop
-         */
         $shop = Di::inst()->make(\App\Service\Shop::class);
         $shop->updateSharedStock($commodity->id, $race, $sku);
 
         return (string)$trade['secret'];
     }
 
-    /**
-     * @param \App\Model\Shared $shared
-     * @param string $code
-     * @param array $map
-     * @return array
-     * @throws GuzzleException
-     * @throws JSONException
-     */
     public function draftCard(\App\Model\Shared $shared, string $code, array $map = []): array
     {
-        $card = $this->post($shared->domain . "/shared/commodity/draftCard", $shared->app_id, $shared->app_key, array_merge([
-            "code" => $code
-        ], $map));
-        //预选卡列表带每张卡的 draft_premium（上游货币），一并换算
-        return SharedCurrency::draftPremiums((array)$card, SharedCurrency::factor($shared));
+        //转发前剔除 draft 以外的 <操作符>-<列> 过滤：预选列表只该按预览内容 draft 搜。否则会把访客构造的
+        //search-secret/betweenStart-secret 原样转发到上游 /shared/commodity/draftCard，成为上游卡密盲注
+        //预言机的跳板（哪怕上游没打补丁，本站也不当放大器）。
+        $post = array_merge(["code" => $code], $this->onlyDraftFilters($map));
+
+        //≤3.1.1 的 draftCard 是 `#[Post] string $sharedCode, int $page, int $limit, string $race`
+        //四个强类型注入参数，名字和必填性都和今天不一样。四个都补齐，新版本会忽略多出来的。
+        $post['sharedCode'] = $code;
+        $post['page'] = max(1, (int)($post['page'] ?? 0));
+        $post['limit'] = max(1, (int)($post['limit'] ?? 0) ?: 10);
+        $post['race'] = (string)($post['race'] ?? '');
+
+        $card = $this->post($shared->domain . "/shared/commodity/draftCard", $shared->app_id, $shared->app_key, $post);
+
+        return SharedCurrency::draftPremiums($this->normalizeDraftCards((array)$card), SharedCurrency::factor($shared));
     }
 
+    /**
+     * 只保留预选卡列表允许的过滤键：`<操作符>-<列>` 里仅 draft 放行，其余（尤其 secret）一律剔除。
+     * 非过滤键（code/page/limit/race/sku 等）原样保留。与 {@see \App\Service\Bind\Query::get()} 的
+     * 列白名单、{@see \App\Controller\Shared\Commodity::draftCard()} 的 setFilterColumns(['draft']) 同规则。
+     *
+     * @param array $map
+     * @return array
+     */
+    private function onlyDraftFilters(array $map): array
+    {
+        $operators = ['equal', 'search', 'betweenStart', 'betweenEnd'];
+        foreach (array_keys($map) as $key) {
+            $args = explode('-', (string)$key);
+            $len = count($args);
+            if ($len >= 2 && $len <= 3 && in_array($args[0], $operators, true) && $args[1] !== 'draft') {
+                unset($map[$key]);
+            }
+        }
+        return $map;
+    }
 
     /**
-     * @param \App\Model\Shared $shared
-     * @param string $code
-     * @param int $cardId
-     * @return array
-     * @throws GuzzleException
-     * @throws JSONException
+     * 预选卡列表的两代形状归一。
+     *
+     * ≤3.1.1 直接把 Laravel 分页器 `toArray()` 丢了出来（`{current_page,data,total,…}`），
+     * 3.1.2 起统一成 `{list,total}`；老版本的字段清单还只有 `['id','draft']`——
+     * 那时 card 表**根本没有 draft_premium 列**，单卡溢价是后来才有的概念，
+     * 所以这里补的 0 不是兜底估算，而是老协议下的准确值。
      */
+    private function normalizeDraftCards(array $data): array
+    {
+        if (!isset($data['list']) && isset($data['data']) && is_array($data['data'])) {
+            $data = [
+                'list' => $data['data'],
+                'total' => (int)($data['total'] ?? count($data['data'])),
+            ];
+        }
+
+        if (!isset($data['list']) || !is_array($data['list'])) {
+            return $data;
+        }
+
+        foreach ($data['list'] as $index => $row) {
+            if (is_array($row) && !array_key_exists('draft_premium', $row)) {
+                $data['list'][$index]['draft_premium'] = 0;
+            }
+        }
+
+        return $data;
+    }
+
     public function getDraft(\App\Model\Shared $shared, string $code, int $cardId): array
     {
-        $draft = $this->post($shared->domain . "/shared/commodity/draft", $shared->app_id, $shared->app_key, [
-            "code" => $code,
-            "card_id" => $cardId
-        ]);
+        $draft = $this->protocolOf($shared) === self::PROTOCOL_LEGACY
+            ? null
+            : $this->postOptional($shared->domain . "/shared/commodity/draft", $shared->app_id, $shared->app_key, [
+                "code" => $code,
+                "card_id" => $cardId
+            ]);
+
+        if ($draft === null) {
+            //≤3.1.1 没有 draft 端点，它那边的 card 表也没有 draft_premium 列——
+            //单卡溢价是 3.1.2 之后才有的概念，所以 0 是准确答案而不是兜底。
+            $this->rememberProtocol($shared, self::PROTOCOL_LEGACY);
+            return ['draft_premium' => 0];
+        }
+
+        $this->rememberProtocol($shared, self::PROTOCOL_MODERN);
+
         return SharedCurrency::draftPremiums((array)$draft, SharedCurrency::factor($shared));
     }
 
-    /**
-     * @param \App\Model\Shared $shared
-     * @param Commodity $commodity
-     * @param string $race
-     * @return array
-     * @throws GuzzleException
-     * @throws JSONException
-     */
     public function inventory(\App\Model\Shared $shared, Commodity $commodity, string $race = ""): array
     {
         $factor = SharedCurrency::factor($shared);
@@ -464,16 +584,6 @@ class Shared implements \App\Service\Shared
         return SharedCurrency::item((array)$inventory, $factor);
     }
 
-    /**
-     * @param Commodity $commodity
-     * @param \App\Model\Shared $shared
-     * @param string $code
-     * @param string|null $race
-     * @param array|null $sku
-     * @return string
-     * @throws GuzzleException
-     * @throws JSONException
-     */
     public function getItemStock(Commodity $commodity, \App\Model\Shared $shared, string $code, ?string $race = null, ?array $sku = []): string
     {
         if ($shared->type == 1) {
@@ -487,31 +597,73 @@ class Shared implements \App\Service\Shared
             return $stock['stock'] ?? "0";
         }
 
-        $stock = $this->post($shared->domain . "/shared/commodity/stock", $shared->app_id, $shared->app_key, [
-            "code" => $code,
-            "race" => $race,
-            "sku" => $sku
-        ]);
-        return $stock['stock'] ?? "0";
+        $stock = $this->protocolOf($shared) === self::PROTOCOL_LEGACY
+            ? null
+            : $this->postOptional($shared->domain . "/shared/commodity/stock", $shared->app_id, $shared->app_key, [
+                "code" => $code,
+                "race" => $race,
+                "sku" => $sku
+            ]);
+
+        if ($stock !== null) {
+            $this->rememberProtocol($shared, self::PROTOCOL_MODERN);
+            return (string)($stock['stock'] ?? "0");
+        }
+
+        //≤3.1.1 没有 stock 端点，用 inventory 的 count 顶上。老协议本来就没有 SKU，
+        //$sku 在这条路上无处可传——真要卖 SKU 商品，下单时上游那边会自己拦。
+        $this->rememberProtocol($shared, self::PROTOCOL_LEGACY);
+        $inventory = $this->legacyInventory($shared, $code, $race);
+
+        return (string)($inventory['count'] ?? "0");
     }
 
     /**
-     * @param Commodity $commodity
-     * @param \App\Model\Shared $shared
-     * @param string $code
-     * @param int $num
-     * @param string|null $race
-     * @param array|null $sku
-     * @param int|null $cardId
-     * @return string|float|int
+     * ≤3.1.1 没有 valuation 端点时的进货成本估算。
+     *
+     * 老版本的 inventory **会按请求方身份现算拿货价**：纯种类商品在
+     * `config[category_factory][种类]`，其余在 `factory_price`。按单价 × 数量算总额。
+     *
+     * **这是估算，不是准数**：批发档、SKU 加价都不在那个接口里（老协议压根没有 SKU）。
+     * 算不出来就返回 0——调用方 `Bind\Order::trade()` 里 `$rent == 0` 会回退到本地
+     * 成本口径（`getCost()`），订单照常成交，只是 `order.rent` 这个统计字段按本地价记。
+     * 宁可退化统计口径，也不能因为老上游少一个接口就让订单下不了。
      */
+    private function legacyValuation(\App\Model\Shared $shared, string $code, int $num, ?string $race, string $factor): string|float|int
+    {
+        $inventory = $this->legacyInventory($shared, $code, $race);
+
+        $config = $inventory['config'] ?? null;
+        if (!is_array($config)) {
+            $config = is_scalar($config) ? Ini::toArray((string)$config) : [];
+        }
+
+        $unit = null;
+        $factory = $config['category_factory'] ?? null;
+        if ((string)$race !== '' && is_array($factory) && isset($factory[$race]) && is_numeric($factory[$race])) {
+            $unit = (string)$factory[$race];
+        } elseif (is_numeric($inventory['factory_price'] ?? null)) {
+            $unit = (string)$inventory['factory_price'];
+        }
+
+        if ($unit === null || (float)$unit <= 0) {
+            return 0;
+        }
+
+        return SharedCurrency::amount(
+            (new Decimal($unit, 6))->mul((string)max(1, $num))->getAmount(6),
+            $factor
+        );
+    }
+
     public function getValuation(Commodity $commodity, \App\Model\Shared $shared, string $code, int $num, ?string $race = null, ?array $sku = [], ?int $cardId = 0): string|float|int
     {
-        //汇率配置错误必须抛出去（下面的 catch 会把一切吞成 0，成本为 0 的报价比报错危险得多）
         $factor = SharedCurrency::factor($shared);
         try {
-            $config = is_array($commodity->config) ? $commodity->config : Ini::toArray($commodity->config);
-            if ($shared->type == 1) { //V4
+            //config 为 null 的商品（没配种类/SKU）在 strict_types 下会让 Ini::toArray 抛
+            //TypeError，被下面的 catch 吞成 0——表现是成本静默按本地口径记。补个转型。
+            $config = is_array($commodity->config) ? $commodity->config : Ini::toArray((string)$commodity->config);
+            if ($shared->type == 1) {
                 $data = $this->mcyRequest($shared->domain . "/plugin/open-api/amount", $shared->app_id, $shared->app_key, [
                     'sku_id' => (int)$config['shared_mapping'][$race],
                     "quantity" => $num
@@ -527,16 +679,23 @@ class Shared implements \App\Service\Shared
                 return SharedCurrency::amount($data['price'] ?? 0, $factor);
             }
 
-            $data = $this->post($shared->domain . "/shared/commodity/valuation", $shared->app_id, $shared->app_key, [
-                'code' => $code,
-                'num' => $num,
-                'race' => $race,
-                'sku' => $sku,
-                'card_id' => $cardId
-            ]);
+            $data = $this->protocolOf($shared) === self::PROTOCOL_LEGACY
+                ? null
+                : $this->postOptional($shared->domain . "/shared/commodity/valuation", $shared->app_id, $shared->app_key, [
+                    'code' => $code,
+                    'num' => $num,
+                    'race' => $race,
+                    'sku' => $sku,
+                    'card_id' => $cardId
+                ]);
 
-            //跨站货币守卫：上游会回报自己的币种，和店铺配置的「对方货币」对不上就告警——
-            //说明店铺档案里选错了货币，换算用的是错误汇率
+            if ($data === null) {
+                $this->rememberProtocol($shared, self::PROTOCOL_LEGACY);
+                return $this->legacyValuation($shared, $code, $num, $race, $factor);
+            }
+
+            $this->rememberProtocol($shared, self::PROTOCOL_MODERN);
+
             $remoteCurrency = strtoupper(trim((string)($data['currency_code'] ?? '')));
             $configured = strtoupper(trim((string)($shared->currency ?? ''))) ?: \App\Util\Currency::DEFAULT_CODE;
             if ($remoteCurrency !== '' && $remoteCurrency !== $configured) {
@@ -549,28 +708,18 @@ class Shared implements \App\Service\Shared
         }
     }
 
-
-    /**
-     * @param string $config
-     * @param string $price
-     * @param string $userPrice
-     * @param int $type
-     * @param float $premium
-     * @return array
-     * @throws JSONException
-     */
     public function AdjustmentPrice(string $config, string $price, string $userPrice, int $type, float $premium): array
     {
         $this->assertPlainPremiumType($type);
         $_config = Ini::toArray($config);
-        //race
+
         if (array_key_exists("category", $_config) && is_array($_config['category'])) {
             foreach ($_config['category'] as &$_price) {
                 $_tmp = new Decimal($_price, 2);
                 $_price = $type == 0 ? $_tmp->add($premium)->getAmount() : $_tmp->add((new Decimal($premium, 3))->mul($_price)->getAmount())->getAmount();
             }
         }
-        //sku
+
         if (array_key_exists("sku", $_config) && is_array($_config['sku'])) {
             foreach ($_config['sku'] as &$sku) {
                 foreach ($sku as &$_price) {
@@ -582,7 +731,6 @@ class Shared implements \App\Service\Shared
             }
         }
 
-        //wholesale
         if (array_key_exists("wholesale", $_config) && is_array($_config['wholesale'])) {
             foreach ($_config['wholesale'] as &$_price) {
                 $_tmp = new Decimal($_price, 2);
@@ -590,7 +738,6 @@ class Shared implements \App\Service\Shared
             }
         }
 
-        //category_wholesale
         if (array_key_exists("category_wholesale", $_config) && is_array($_config['category_wholesale'])) {
             foreach ($_config['category_wholesale'] as &$categoryWholesale) {
                 foreach ($categoryWholesale as &$_price) {
@@ -603,28 +750,20 @@ class Shared implements \App\Service\Shared
         $_tmp = new Decimal($price, 2);
         $price = $type == 0 ? $_tmp->add($premium)->getAmount() : $_tmp->add((new Decimal($premium, 3))->mul($price)->getAmount())->getAmount();
 
-
-        $_tmp = new Decimal($userPrice, 2);
-        $userPrice = $type == 0 ? $_tmp->add($premium)->getAmount() : $_tmp->add((new Decimal($premium, 3))->mul($userPrice)->getAmount())->getAmount();
-
+        //上游会员价留空(0)的意思是「会员按零售价」，本地 memberPrice() 同样回退零售价——留空就保持留空。
+        //以前对 0 照样加价：固定加价后本地会员价变成「加价额本身」（上游 10 元、+1 → 会员价 1.00），
+        //登录买家 1 元买走、平台向上游付 10 元。SharedStock 插件与 items() 树发的都是原始 0；
+        //核心 3.7.1+ 的 item() 已先回退成零售价，不受影响。
+        if (!is_numeric($userPrice) || (float)$userPrice <= 0) {
+            $userPrice = '0.00';
+        } else {
+            $_tmp = new Decimal($userPrice, 2);
+            $userPrice = $type == 0 ? $_tmp->add($premium)->getAmount() : $_tmp->add((new Decimal($premium, 3))->mul($userPrice)->getAmount())->getAmount();
+        }
 
         return ["config" => $_config, "price" => $price, "user_price" => $userPrice];
     }
 
-
-    /**
-     * 按加价模板计算接入商品的整套价格。
-     *
-     * 返回结构刻意与 AdjustmentPrice 对齐（config 同样是数组），调用方两种加价模式可以共用同一段代码；
-     * 多出来的 level_price 是模板独有的能力——普通加价没法给每个会员等级单独定价。
-     *
-     * @param PriceTemplate $template
-     * @param string $config
-     * @param string $price
-     * @param string $userPrice
-     * @param string $levelPrice
-     * @return array{config: array, price: string, user_price: string, level_price: string}
-     */
     public function AdjustmentTemplate(PriceTemplate $template, string $config, string $price, string $userPrice, string $levelPrice = ''): array
     {
         $result = $template->forShared($config, $price, $userPrice, $levelPrice);
@@ -636,13 +775,6 @@ class Shared implements \App\Service\Shared
         ];
     }
 
-
-    /**
-     * @param int $type
-     * @param float $premium
-     * @param float|int|string $amount
-     * @return string
-     */
     public function AdjustmentAmount(int $type, float $premium, float|int|string $amount): string
     {
         $this->assertPlainPremiumType($type);
@@ -650,19 +782,6 @@ class Shared implements \App\Service\Shared
         return $type == PriceTemplate::TYPE_FIXED ? $_tmp->add($premium)->getAmount() : $_tmp->add((new Decimal($premium, 3))->mul($amount)->getAmount())->getAmount();
     }
 
-    /**
-     * 这两个方法只会算「固定金额」和「百分比」两种加价。
-     *
-     * 它们原来的写法是 `$type == 0 ? 加固定值 : 加百分比` —— 任何不认识的 type
-     * 都会被当成百分比。加价模板（type=2）的 premium 恒为 0，于是
-     * `价格 + 0 × 价格 = 价格`，加价被静默抹平，商品按进货价卖出去。
-     * 这个 bug 藏了很久才被发现（表现是首页价格来回跳），所以这里改成显式白名单：
-     * 不认识的加价模式当场抛错，让它在第一次调用时就暴露，而不是变成收入损失。
-     *
-     * 模板模式请走 AdjustmentTemplate() 或 AdjustmentExtra()。
-     *
-     * @throws JSONException
-     */
     private function assertPlainPremiumType(int $type): void
     {
         if ($type === PriceTemplate::TYPE_FIXED || $type === PriceTemplate::TYPE_PERCENT) {
@@ -674,11 +793,6 @@ class Shared implements \App\Service\Shared
         throw new JSONException("未知的加价模式({$type})");
     }
 
-
-    /**
-     * 取商品的加价模板。只有加价模式确实是「模板」时才认，
-     * 避免旧数据里残留的 template_id 在其他模式下意外生效。
-     */
     private function resolvePremiumTemplate(Commodity $commodity): ?PriceTemplate
     {
         if ((int)$commodity->shared_premium_type !== PriceTemplate::SHARED_PREMIUM_TYPE) {
@@ -703,7 +817,6 @@ class Shared implements \App\Service\Shared
         }
 
         if ((int)$commodity->shared_premium_type === PriceTemplate::SHARED_PREMIUM_TYPE) {
-            //选了模板却取不到，按原价返回并留下痕迹，绝不用错误的公式硬算
             \Kernel\Util\Log::inst()->error("商品[{$commodity->id}]的加价模板不可用，附加金额未加价");
             return (string)$amount;
         }
@@ -712,11 +825,30 @@ class Shared implements \App\Service\Shared
     }
 
     /**
-     * @param Commodity|int $commodity
-     * @return bool
-     * @throws GuzzleException
-     * @throws JSONException
+     * 非种类商品在上游的拿货成本，已按汇率换算。算不出来返回 null，调用方保持原值。
+     *
+     * 优先用 item() 里的 factory_price：3.6.5 起上游 item() 按请求方身份现算（calcAmount，
+     * 与 inventory() 同口径，#842），不用多发请求。更早的上游 item() 不带这个字段，就改问
+     * inventory()——它从老协议起就一直按请求方身份现算拿货价，所有版本都有，只是多一次请求。
+     * （≤3.1.1 与 SharedStock 协议里的 factory_price 是上游自己的成本列，已在 item() 里剔掉。）
      */
+    public function remoteCost(\App\Model\Shared $shared, Commodity $commodity, array $remoteItem): ?string
+    {
+        $value = $remoteItem['factory_price'] ?? null;
+        if (!is_numeric($value)) {
+            try {
+                $value = $this->inventory($shared, $commodity)['factory_price'] ?? null;
+            } catch (\Throwable $e) {
+                return null;
+            }
+        }
+        //列是 decimal(10,2) UNSIGNED；汇率换算后可能出现科学计数法，先规整成定点小数再交给 bcmath
+        if (!is_numeric($value) || !is_finite((float)$value) || (float)$value < 0 || (float)$value > 99999999.99) {
+            return null;
+        }
+        return (new Decimal(sprintf('%.6F', (float)$value), 2))->getAmount();
+    }
+
     public function syncRemoteItem(Commodity|int $commodity): bool
     {
         if (is_int($commodity)) {
@@ -736,12 +868,10 @@ class Shared implements \App\Service\Shared
         $remoteItem = $this->item($shared, $commodity->shared_code);
         $remoteConfig = Ini::toConfig($remoteItem['config'] ?: []);
 
-        //入库时选了加价模板的商品，每次同步都要按模板重算，否则价格会退回"平进平出"
         $template = $this->resolvePremiumTemplate($commodity);
         $usesTemplate = (int)$commodity->shared_premium_type === PriceTemplate::SHARED_PREMIUM_TYPE;
         $priceSyncable = !($usesTemplate && !$template);
         if (!$priceSyncable) {
-            //模板没了：宁可这次不同步价格，也不能退回无加价把售价刷成进货价
             \Kernel\Util\Log::inst()->error("商品[{$commodity->id}]的加价模板不可用，本次跳过价格与配置同步");
         }
 
@@ -764,7 +894,6 @@ class Shared implements \App\Service\Shared
                 );
         }
 
-
         $_config = $remoteItem['config'] ?: [];
 
         if (!empty($_config['sku'])) {
@@ -775,10 +904,23 @@ class Shared implements \App\Service\Shared
             $base['config']['category_cost'] = $_config['category'];
         }
 
+        //没配置参数（非种类）商品的进货成本。种类/SKU 商品的成本就是上面写进 config 的
+        //category_cost / sku_cost，而没配置参数的商品成本只能落在 factory_price 这一列——
+        //以前这里从来不写、导入时又固定写 0，这类商品的成本就永远是 0。
+        //成本是上游的事实而不是加价，不受加价模板影响；但价格同步和配置同步都关着，
+        //说明站长要自己管，这里就不动它。
+        if (empty($_config['category'])
+            && ((int)$commodity->shared_amount_sync === 1 || (int)$commodity->shared_config_sync === 1)) {
+            $cost = $this->remoteCost($shared, $commodity, $remoteItem);
+            if ($cost !== null) {
+                $commodity->factory_price = $cost;
+            }
+        }
+
         if ($priceSyncable && $commodity->shared_amount_sync === 1) {
             $commodity->price = $base['price'];
             $commodity->user_price = $base['user_price'];
-            //模板还负责各会员等级的价格，同步价格时一并按模板重算
+
             if ($template && ($base['level_price'] ?? '') !== '') {
                 $commodity->level_price = $base['level_price'];
             }
@@ -794,19 +936,17 @@ class Shared implements \App\Service\Shared
                 ? $this->AdjustmentExtra($commodity, $remoteItem['draft_premium'])
                 : 0;
         }
-        $commodity->seckill_status = $remoteItem['seckill_status'];
-        $commodity->seckill_start_time = $remoteItem['seckill_start_time'];
-        $commodity->seckill_end_time = $remoteItem['seckill_end_time'];
         $commodity->widget = is_array($remoteItem['widget']) ? json_encode($remoteItem['widget']) : $remoteItem['widget'];
-        $commodity->minimum = $remoteItem['minimum'];
-        $commodity->maximum = $remoteItem['maximum'];
         $commodity->stock = $remoteItem['stock'];
-        $commodity->contact_type = $remoteItem['contact_type'];
-        //详情页的库存走 shared_stock 缓存，而这份缓存此前只有「本站卖出一单」才会失效——
-        //上游补货或在别处卖光都刷不掉它，商品能一直显示售罄或一直显示有货。
-        //同步本来就是为了让接入商品跟上上游，顺手把它清掉，下次访问详情页重新拉。
+
         $commodity->shared_stock = [];
         $commodity->save();
+
+        //上游同步会改写售价/库存/配置，对下游而言等同于一次商品变更
+        $ebIds = [(int)$commodity->id];
+        $ebAction = 'sync';
+        $ebBefore = null;
+        hook(\App\Consts\Hook::COMMODITY_CHANGE_AFTER, $ebIds, $ebAction, $ebBefore);
 
         return true;
     }

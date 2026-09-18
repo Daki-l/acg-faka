@@ -9,6 +9,7 @@ use App\Entity\Query\Get;
 use App\Entity\Query\Save;
 use App\Interceptor\ManageSession;
 use App\Model\ManageLog;
+use App\Util\LangRecycle;
 use App\Service\Query;
 use App\Util\Client;
 use App\Util\Date;
@@ -105,7 +106,7 @@ class Commodity extends Manage
      */
     /**
      * 有关联数据不再阻止删除 —— 关联的卡密、订单、优惠券、商户映射、工单
-     * 会由 cascadeDeleteCommodityRelations() 一并删掉。
+     * 会由 App\Util\CommodityPurge::cascade() 一并删掉。
      * 这里只负责把名字挑出来，给前端的确认弹窗用。
      */
     private function commodityDeletionPlan(array $commodityIds, array $namesById, array $referenceCounts): array
@@ -136,94 +137,6 @@ class Commodity extends Manage
      * @return array
      * @throws JSONException
      */
-    /**
-     * 连带删除商品名下的全部关联数据。
-     *
-     * 顺序是有讲究的：先删子表再删主表，否则 order_option / ticket_message
-     * 会变成谁也引用不到的孤儿行。整个过程由 del() 的事务包着，中途失败全回滚。
-     *
-     * !! 这会真的删掉订单和工单 !!
-     * 也就是说该商品的销售与售后历史一并消失，账单统计里对不上。
-     * 这是产品上明确选择的行为（删商品即清干净），不是疏漏。
-     */
-    private function cascadeDeleteCommodityRelations(array $commodityIds): void
-    {
-        //与 commodityDeleteImpact 同一套缺表降级：老库缺哪张就跳过哪张（issue #837）
-        $orderIds = \App\Model\Order::query()
-            ->whereIn('commodity_id', $commodityIds)
-            ->pluck('id')
-            ->map(static fn($id): int => (int)$id)
-            ->all();
-        if ($orderIds !== [] && \App\Util\Schema::tableExists('order_option')) {
-            \App\Model\OrderOption::query()->whereIn('order_id', $orderIds)->delete();
-        }
-
-        $hasTicket = \App\Util\Schema::tableExists('ticket');
-        if ($hasTicket) {
-            $ticketIds = \App\Model\Ticket::query()
-                ->whereIn('commodity_id', $commodityIds)
-                ->pluck('id')
-                ->map(static fn($id): int => (int)$id)
-                ->all();
-            if ($ticketIds !== [] && \App\Util\Schema::tableExists('ticket_message')) {
-                \App\Model\TicketMessage::query()->whereIn('ticket_id', $ticketIds)->delete();
-            }
-        }
-
-        \App\Model\Order::query()->whereIn('commodity_id', $commodityIds)->delete();
-        if ($hasTicket) {
-            \App\Model\Ticket::query()->whereIn('commodity_id', $commodityIds)->delete();
-        }
-        \App\Model\Card::query()->whereIn('commodity_id', $commodityIds)->delete();
-        \App\Model\Coupon::query()->whereIn('commodity_id', $commodityIds)->delete();
-        if (\App\Util\Schema::tableExists('user_commodity')) {
-            \App\Model\UserCommodity::query()->whereIn('commodity_id', $commodityIds)->delete();
-        }
-
-        if (\App\Util\Schema::tableExists('commodity_group')) {
-            $this->detachFromCommodityGroups($commodityIds);
-        }
-    }
-
-    /**
-     * 商品分组把成员存成 JSON 数组，没有外键，只能逐个读出来重写。
-     * 删的是「成员引用」不是分组本身 —— 分组里通常还挂着别的商品。
-     */
-    private function detachFromCommodityGroups(array $commodityIds): void
-    {
-        $lookup = array_fill_keys($commodityIds, true);
-
-        foreach (\App\Model\CommodityGroup::query()->orderBy('id')->lockForUpdate()->get() as $group) {
-            $references = $group->commodity_list;
-            if (!is_array($references)) {
-                $references = [$references];
-            }
-
-            $kept = [];
-            $changed = false;
-            foreach ($references as $reference) {
-                if (is_int($reference)) {
-                    $referenceId = $reference;
-                } elseif (is_string($reference) && ctype_digit(trim($reference))) {
-                    $referenceId = (int)trim($reference);
-                } else {
-                    $kept[] = $reference;
-                    continue;
-                }
-                if (isset($lookup[$referenceId])) {
-                    $changed = true;
-                    continue;
-                }
-                $kept[] = $reference;
-            }
-
-            if ($changed) {
-                $group->commodity_list = array_values($kept);
-                $group->save();
-            }
-        }
-    }
-
     private function commodityDeleteImpact(array $requestedIds, bool $lock = false): array
     {
         if ($requestedIds === []) {
@@ -375,6 +288,8 @@ class Commodity extends Manage
         $get->setPaginate((int)$this->request->post("page"), (int)$this->request->post("limit"));
         $get->setWhere($map);
         $get->setOrderBy(...$this->query->getOrderBy($map, "sort", "asc"));
+        //排序值相同（绝大多数商品都是 0）时按 id 定先后：分页才不会漏行重行，拖动排序也要以这个顺序为准（见 reorder()）
+        $get->addOrderBy("id", "asc");
 
         $data = $this->query->get($get, function (Builder $builder) use ($map) {
             if (isset($map['display_scope'])) {
@@ -400,21 +315,21 @@ class Commodity extends Manage
                 'card as card_success_count' => function (Builder $builder) {
                     $builder->where("status", 1);
                 },
-                //商品总盈利
+                //商品销售额（扣除支付通道手续费 pay_cost，不含商品成本 rent）。issue #903
                 'order as order_all_amount' => function (Builder $relation) {
-                    $relation->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount),0) as order_all_amount"));
+                    $relation->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount - COALESCE(pay_cost, 0)),0) as order_all_amount"));
                 },
                 //过去7天内盈利
                 'order as order_week_amount' => function (Builder $relation) {
-                    $relation->whereBetween('create_time', [Date::weekDay(1, Date::TYPE_START), Date::weekDay(7, Date::TYPE_END)])->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount),0) as order_week_amount"));
+                    $relation->whereBetween('create_time', [Date::weekDay(1, Date::TYPE_START), Date::weekDay(7, Date::TYPE_END)])->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount - COALESCE(pay_cost, 0)),0) as order_week_amount"));
                 },
                 //昨日盈利
                 'order as order_yesterday_amount' => function (Builder $relation) {
-                    $relation->whereBetween('create_time', [Date::calcDay(-1), Date::calcDay()])->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount),0) as order_yesterday_amount"));
+                    $relation->whereBetween('create_time', [Date::calcDay(-1), Date::calcDay(-1, Date::TYPE_END)])->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount - COALESCE(pay_cost, 0)),0) as order_yesterday_amount"));
                 },
                 //今日盈利
                 'order as order_today_amount' => function (Builder $relation) {
-                    $relation->whereBetween('create_time', [Date::calcDay(), Date::calcDay(1)])->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount),0) as order_today_amount"));
+                    $relation->whereBetween('create_time', [Date::calcDay(), Date::calcDay(0, Date::TYPE_END)])->where("status", 1)->select(\App\Model\Order::query()->raw("COALESCE(sum(amount - COALESCE(pay_cost, 0)),0) as order_today_amount"));
                 }
             ]);
         });
@@ -484,13 +399,9 @@ class Commodity extends Manage
             $map['tags'] = \App\Model\Commodity::normalizeTags($map['tags']);
         }
 
-        //商品介绍是管理员富文本，取未过滤原文入库(#775)，与卡密secret的unsafePost先例一致；商户端保存不豁免
-        if (array_key_exists('description', $map)) {
-            $rawDescription = $request->unsafePost('description');
-            if (is_string($rawDescription) && !str_contains($rawDescription, "\0")) {
-                $map['description'] = $rawDescription;
-            }
-        }
+        //商品介绍是富文本，但必须与商户端同一条 post() 净化管线（HTMLPurifier：去脚本/事件/伪协议、留排版）。
+        //$map['description'] 已经是 $raw（post(NORMAL)=已净化）里的值，这里不再用 unsafePost 原文覆盖它——
+        //否则任意管理员档位即可把可执行 HTML 写进 item.description(∈ RAW_PATHS 原样渲染) → 全站存储型 XSS。
 
         $id = isset($map['id']) ? (int)$map['id'] : 0;
         $current = $id > 0 ? \App\Model\Commodity::query()->find($id) : null;
@@ -584,9 +495,11 @@ class Commodity extends Manage
         if (array_key_exists('config', $map)) {
             $save->addForceMap('config', $map['config'] ?? '');
         }
+        $newCode = '';
         if ($id === 0) {
+            $newCode = strtoupper(Str::generateRandStr(16));
             $save->addForceMap('owner', 0);
-            $save->addForceMap('code', strtoupper(Str::generateRandStr(16)));
+            $save->addForceMap('code', $newCode);
         } else {
             $save->disableAddable();
         }
@@ -625,6 +538,23 @@ class Commodity extends Manage
         }
 
         ManageLog::log($this->getManage(), "[修改/新增]商品");
+        //Query::save() 只返回 bool，新建路径拿不到自增 id，靠刚生成的 code 回查（code 有索引）
+        $changedId = $id > 0 ? $id : (int)\App\Model\Commodity::query()->where('code', $newCode)->value('id');
+        if ($changedId > 0) {
+            //hook() 的变参是按引用接收的，字面量和表达式都传不进去，必须先落成变量
+            $ebIds = [$changedId];
+            $ebAction = $id > 0 ? 'update' : 'create';
+            hook(\App\Consts\Hook::COMMODITY_CHANGE_AFTER, $ebIds, $ebAction, $current);
+        }
+
+        //改掉的旧文案要把它的翻译带走：翻译库按 md5(原文) 寻址，不回收的话改一次名字
+        //就多一条没人认领的废词条，日子久了词条表里全是垃圾（GitHub #888）
+        if ($current !== null && $changedId > 0) {
+            $before = LangRecycle::commodityTexts($current);
+            $after = LangRecycle::commodityTexts(\App\Model\Commodity::query()->find($changedId));
+            LangRecycle::release(array_diff($before, $after));
+        }
+
         return $this->json(200, '（＾∀＾）保存成功');
     }
 
@@ -636,6 +566,11 @@ class Commodity extends Manage
     public function del(): array
     {
         $requestedIds = $this->commodityIds($_POST['list'] ?? []);
+        //删完就查不到了，先把这些商品的文案抓在手上，事务成功后再去回收它们的翻译
+        $doomedTexts = [];
+        foreach (\App\Model\Commodity::query()->whereIn('id', $requestedIds)->get() as $doomed) {
+            $doomedTexts = array_merge($doomedTexts, LangRecycle::commodityTexts($doomed));
+        }
         try {
             $impact = DB::transaction(function () use ($requestedIds): array {
                 $impact = $this->commodityDeleteImpact($requestedIds, true);
@@ -645,7 +580,7 @@ class Commodity extends Manage
 
                 $ids = $impact['commodity_ids'];
                 if ($ids !== []) {
-                    $this->cascadeDeleteCommodityRelations($ids);
+                    \App\Util\CommodityPurge::cascade($ids);
                 }
 
                 $expectedDeleteCount = count($ids);
@@ -663,6 +598,15 @@ class Commodity extends Manage
             //与 deleteImpact 同理：事务已回滚，把真实原因透出去并落日志（issue #837）
             \Kernel\Util\Log::inst()->error("[商品删除] " . $e->getFile() . ":" . $e->getLine() . " " . $e->getMessage());
             throw new JSONException("商品删除失败，操作已回滚：" . mb_substr($e->getMessage(), 0, 160));
+        }
+
+        $deletedIds = array_values(array_map('intval', (array)($impact['commodity_ids'] ?? [])));
+        if ($deletedIds !== []) {
+            $ebAction = 'delete';
+            $ebBefore = null;
+            hook(\App\Consts\Hook::COMMODITY_CHANGE_AFTER, $deletedIds, $ebAction, $ebBefore);
+            //商品没了，它的翻译也跟着走（前提是没有别的商品/分类/历史订单还在用同一段文案）
+            LangRecycle::release($doomedTexts);
         }
 
         $deletedCount = $impact['deletable_count'];
@@ -714,6 +658,103 @@ class Commodity extends Manage
     }
 
     /**
+     * 拖动排序：前端提交「当前这一页商品」拖完之后的顺序。
+     *
+     * 商品列表是分页 + 可筛选的：只重排这一页、给它们写 0..n-1，会和其它页的排序值撞号，全站顺序就乱了。
+     * 这里把全部商品按列表同一口径（sort 升序、id 升序）排成一条全局顺序，这一页的商品在里面占着若干个位置——
+     * **位置集合不变，只把这几个商品按新顺序填回这些位置**，其余商品原地不动；再把全局顺序落成连续的排序值。
+     * 分页、按分类 / 名称 / 状态 / 对接平台筛选时都成立。
+     *
+     * 第一次拖时大多数商品排序值都是 0（先后靠 id 兜底），要整体落一次号；之后每次只改这一页里真正换了位置的商品。
+     * 商品变更钩子**只报位置真的变了的商品**：一次性落号只是把隐式顺序写成显式数字，先后没变——
+     * 事件广播中心的指纹含 sort，全报的话下游会收到整站商品的变更事件（下游自动货源接入并不使用 sort）。
+     *
+     * @return array
+     * @throws JSONException
+     */
+    public function reorder(): array
+    {
+        $ids = $this->commodityIds($_POST['list'] ?? []);
+        if (count($ids) < 2) {
+            throw new JSONException('至少需要两个商品才能调整顺序');
+        }
+
+        $result = DB::transaction(function () use ($ids): array {
+            $rows = \App\Model\Commodity::query()->orderBy('sort')->orderBy('id')->lockForUpdate()->get(['id', 'sort']);
+            $order = [];
+            $current = [];
+            foreach ($rows as $row) {
+                $order[] = (int)$row->id;
+                $current[(int)$row->id] = (int)$row->sort;
+            }
+            //sort 列是 smallint unsigned，连续编号最多放得下 65536 个
+            if (count($order) > 65536) {
+                throw new JSONException('商品数量超过 65536 个，排序值放不下，无法拖动排序');
+            }
+
+            $position = array_flip($order);
+            $slots = [];
+            foreach ($ids as $id) {
+                if (!isset($position[$id])) {
+                    throw new JSONException('部分商品已不存在，请刷新后再调整顺序');
+                }
+                $slots[] = $position[$id];
+            }
+            sort($slots, SORT_NUMERIC);
+
+            $moved = [];
+            foreach ($slots as $k => $slot) {
+                if ($order[$slot] !== $ids[$k]) {
+                    $moved[] = $ids[$k];
+                }
+                $order[$slot] = $ids[$k];
+            }
+            if ($moved === []) {
+                //顺序和库里一致（比如别人刚排过同样的顺序）：什么都不写，把现有排序值还给前端显示
+                $sorts = [];
+                foreach ($ids as $id) {
+                    $sorts[$id] = $current[$id];
+                }
+                return ['moved' => [], 'updated' => 0, 'sorts' => $sorts];
+            }
+
+            $updates = [];
+            foreach ($order as $index => $id) {
+                if ($current[$id] !== $index) {
+                    $updates[$id] = $index;
+                }
+            }
+            //批量写：CASE 里只有整数，没有外部字符串，不存在注入面
+            foreach (array_chunk($updates, 500, true) as $chunk) {
+                $case = 'CASE `id`';
+                foreach ($chunk as $id => $sort) {
+                    $case .= ' WHEN ' . (int)$id . ' THEN ' . (int)$sort;
+                }
+                $case .= ' END';
+                \App\Model\Commodity::query()->whereIn('id', array_keys($chunk))->update(['sort' => DB::raw($case)]);
+            }
+
+            $newPosition = array_flip($order);
+            $sorts = [];
+            foreach ($ids as $id) {
+                $sorts[$id] = $newPosition[$id];
+            }
+            return ['moved' => $moved, 'updated' => count($updates), 'sorts' => $sorts];
+        });
+
+        if ($result['moved'] !== []) {
+            //hook() 的变参按引用接收，必须先落成变量
+            $ebIds = $result['moved'];
+            $ebAction = 'sort';
+            $ebBefore = null;
+            hook(\App\Consts\Hook::COMMODITY_CHANGE_AFTER, $ebIds, $ebAction, $ebBefore);
+            ManageLog::log($this->getManage(), "[拖动排序]商品，调整 " . count($result['moved']) . " 个，写入排序值 {$result['updated']} 个");
+        }
+
+        return $this->json(200, '排序已保存', ['sorts' => $result['sorts']]);
+    }
+
+    /**
      * @return array
      */
     public function status(): array
@@ -725,6 +766,11 @@ class Commodity extends Manage
         }
         $status = (int)$rawStatus;
         $count = \App\Model\Commodity::query()->whereIn('id', $list)->update(['status' => $status]);
+        if ($count > 0) {
+            $ebAction = 'status';
+            $ebBefore = null;
+            hook(\App\Consts\Hook::COMMODITY_CHANGE_AFTER, $list, $ebAction, $ebBefore);
+        }
         ManageLog::log($this->getManage(), "[批量更新]商品启停状态，共计：{$count}");
         return $this->json(200, $count > 0 ? '商品状态已经更新' : '商品状态无需更新', ['count' => $count]);
     }
@@ -786,6 +832,13 @@ class Commodity extends Manage
                 'shared_updated_count' => $sharedCount,
             ];
         });
+
+        //广播用请求的 id 集合即可：订阅方是拿快照算差量的，多给的 id 算不出变化，不会产生事件
+        if ((int)($result['updated_count'] ?? 0) > 0) {
+            $ebAction = 'batch';
+            $ebBefore = null;
+            hook(\App\Consts\Hook::COMMODITY_CHANGE_AFTER, $list, $ebAction, $ebBefore);
+        }
 
         ManageLog::log(
             $this->getManage(),

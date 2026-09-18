@@ -9,6 +9,7 @@ use App\Entity\Query\Delete;
 use App\Entity\Query\Get;
 use App\Entity\Query\Save;
 use App\Interceptor\ManageSession;
+use App\Interceptor\Owner;
 use App\Model\Bill;
 use App\Model\Business;
 use App\Model\ManageLog;
@@ -78,6 +79,8 @@ class User extends Manage
      * @return array
      * @throws JSONException
      */
+    //改会员密码/邮箱/手机/状态/上级/商户等级=账号接管面，收敛到站长(type==0)本人（F-12）
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
     public function save(): array
     {
         if (strtoupper($this->request->method()) !== 'POST') {
@@ -244,6 +247,8 @@ class User extends Manage
     /**
      * @throws JSONException
      */
+    //直接改会员余额=铸币，收敛到站长(type==0)本人（F-12）
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
     public function recharge(): array
     {
         $user = $this->changeAccountBalance(0);
@@ -254,6 +259,8 @@ class User extends Manage
     /**
      * @throws JSONException
      */
+    //直接改会员硬币=铸币，收敛到站长(type==0)本人（F-12）
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
     public function coin(): array
     {
         $user = $this->changeAccountBalance(1);
@@ -328,13 +335,13 @@ class User extends Manage
         $order = \App\Model\Order::query()->where("user_id", $userId)->where("status", 1);
         $data = [];
         //今日交易
-        $data['today_order_amount'] = sprintf("%.2f", (clone $order)->whereBetween('create_time', [Date::calcDay(), Date::calcDay(1)])->sum("amount"));
+        $data['today_order_amount'] = sprintf("%.2f", (clone $order)->whereBetween('create_time', [Date::calcDay(), Date::calcDay(0, Date::TYPE_END)])->sum("amount"));
         //昨日交易
-        $data['yesterday_order_amount'] = sprintf("%.2f", (clone $order)->whereBetween('create_time', [Date::calcDay(-1), Date::calcDay()])->sum("amount"));
+        $data['yesterday_order_amount'] = sprintf("%.2f", (clone $order)->whereBetween('create_time', [Date::calcDay(-1), Date::calcDay(-1, Date::TYPE_END)])->sum("amount"));
         //本周交易
         $data['week_order_amount'] = sprintf("%.2f", (clone $order)->whereBetween('create_time', [Date::weekDay(1, Date::TYPE_START), Date::weekDay(7, Date::TYPE_END)])->sum("amount"));
         //本月交易
-        $data['month_order_amount'] = sprintf("%.2f", (clone $order)->whereBetween('create_time', [date("Y-m-01 00:00:00"), Date::calcDay()])->sum("amount"));
+        $data['month_order_amount'] = sprintf("%.2f", (clone $order)->whereBetween('create_time', [Date::monthDay(), Date::monthDay(Date::TYPE_END)])->sum("amount"));
         //全部交易
         $data['total_order_amount'] = sprintf("%.2f", (clone $order)->sum("amount"));
 
@@ -472,6 +479,8 @@ class User extends Manage
     /**
      * @throws JSONException
      */
+    //改会员折扣等级=影响全站购买折扣，收敛到站长(type==0)本人（F-12）
+    #[Interceptor(Owner::class, Interceptor::TYPE_API)]
     public function fastUpdateUserGroup(): array
     {
         if (strtoupper($this->request->method()) !== 'POST') {
