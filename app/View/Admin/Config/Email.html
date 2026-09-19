@@ -24,22 +24,135 @@
     }
 
     :root[data-theme] .md-order-email-template__html {
-        min-height: 420px;
+        min-height: 620px;
         resize: vertical;
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         font-size: 13px;
         line-height: 1.5;
     }
 
+    :root[data-theme] .md-settings .md-order-email-template > .form > .card-body {
+        display: block;
+        padding: 32px !important;
+    }
+
+    :root[data-theme] .md-order-email-template__workspace {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 28px;
+        align-items: start;
+    }
+
+    :root[data-theme] .md-order-email-template__editor,
+    :root[data-theme] .md-order-email-template__preview-panel {
+        min-width: 0;
+    }
+
+    :root[data-theme] .md-order-email-template__editor {
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+    }
+
+    :root[data-theme] .md-order-email-template__field {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    :root[data-theme] .md-order-email-template__field-label,
+    :root[data-theme] .md-order-email-template__placeholders-title {
+        color: var(--md-on-surface, #202124);
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1.4;
+    }
+
+    :root[data-theme] .md-order-email-template__placeholders-section {
+        border-top: 1px solid var(--md-divider, #e8eaed);
+        padding-top: 18px;
+    }
+
+    :root[data-theme] .md-order-email-template__placeholders-help,
+    :root[data-theme] .md-order-email-template__preview-help {
+        margin: 5px 0 0;
+        color: var(--md-on-surface-med, #6b7280);
+        font-size: 12px;
+        line-height: 1.5;
+    }
+
+    :root[data-theme] .md-order-email-template__preview-help {
+        padding: 0 14px 14px;
+    }
+
+    :root[data-theme] .md-order-email-template__placeholders {
+        margin-top: 12px;
+    }
+
+    :root[data-theme] .md-order-email-template__preview-panel {
+        border: 1px solid var(--md-divider, #e1e3e6);
+        border-radius: 6px;
+        overflow: hidden;
+        background: var(--md-surface, #ffffff);
+    }
+
+    :root[data-theme] .md-order-email-template__preview-heading {
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--md-divider, #e1e3e6);
+    }
+
+    :root[data-theme] .md-order-email-template__preview-title {
+        display: block;
+        color: var(--md-on-surface, #202124);
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.4;
+    }
+
+    :root[data-theme] .md-order-email-template__preview-subject {
+        display: block;
+        margin-top: 4px;
+        overflow: hidden;
+        color: var(--md-on-surface-med, #6b7280);
+        font-size: 13px;
+        line-height: 1.4;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    :root[data-theme] .md-order-email-template__preview-canvas {
+        padding: 14px;
+        background: var(--md-surface-2, #f4f6f8);
+    }
+
     :root[data-theme] .md-order-email-template__preview {
         display: block;
         width: 100%;
         height: 640px;
-        border: 1px solid var(--bs-gray-300);
-        background: #f4f6f8;
+        border: 1px solid var(--md-divider, #dfe3e8);
+        background: #ffffff;
+        box-sizing: border-box;
+    }
+
+    :root[data-theme] .md-settings .md-order-email-template > .form > .card-footer {
+        justify-content: flex-end !important;
     }
 
     @media (max-width: 991.98px) {
+        :root[data-theme] .md-settings .md-order-email-template > .form > .card-body {
+            padding: 16px !important;
+        }
+
+        :root[data-theme] .md-order-email-template__workspace {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 20px;
+        }
+
+        :root[data-theme] .md-order-email-template__html {
+            min-height: 460px;
+        }
+
         html[data-admin-layout="mobile"] .md-config-test-layer .layui-layer-input {
             box-sizing: border-box;
             width: 100%;
@@ -233,42 +346,43 @@
                 </div>
                 <form id="order-email-template-form" method="post" class="form">
                     <div class="card-body p-9">
-                        <div class="row mb-6">
-                            <label class="col-lg-4 col-form-label required fw-bold fs-6" for="order-email-template-logo">Logo URL</label>
-                            <div class="col-lg-8 fv-row">
-                                <input id="order-email-template-logo" type="url" name="logo_url" inputmode="url" autocapitalize="none" spellcheck="false"
-                                       class="form-control form-control-lg form-control-solid" placeholder="https://example.com/logo.png">
-                            </div>
-                        </div>
+                        <div class="md-order-email-template__workspace">
+                            <section class="md-order-email-template__editor" aria-label="订单发货邮件模板编辑器">
+                                <div class="md-order-email-template__field">
+                                    <label class="md-order-email-template__field-label" for="order-email-template-logo">Logo URL</label>
+                                    <input id="order-email-template-logo" type="url" name="logo_url" inputmode="url" autocapitalize="none" spellcheck="false"
+                                           class="form-control form-control-lg form-control-solid" placeholder="https://example.com/logo.png">
+                                </div>
 
-                        <div class="row mb-6">
-                            <label class="col-lg-4 col-form-label required fw-bold fs-6" for="order-email-template-subject">邮件主题</label>
-                            <div class="col-lg-8 fv-row">
-                                <input id="order-email-template-subject" type="text" name="subject" maxlength="255"
-                                       class="form-control form-control-lg form-control-solid" placeholder="【发货提醒】Weiloo 小店订单已发货">
-                            </div>
-                        </div>
+                                <div class="md-order-email-template__field">
+                                    <label class="md-order-email-template__field-label" for="order-email-template-subject">邮件主题</label>
+                                    <input id="order-email-template-subject" type="text" name="subject" maxlength="255"
+                                           class="form-control form-control-lg form-control-solid" placeholder="【发货提醒】Weiloo 小店订单已发货">
+                                </div>
 
-                        <div class="row mb-6">
-                            <label class="col-lg-4 col-form-label fw-bold fs-6">可用占位符</label>
-                            <div class="col-lg-8 fv-row">
-                                <div id="order-email-template-placeholders" class="md-order-email-template__placeholders"></div>
-                            </div>
-                        </div>
+                                <div class="md-order-email-template__field">
+                                    <label class="md-order-email-template__field-label" for="order-email-template-html">HTML 模板</label>
+                                    <textarea id="order-email-template-html" name="html" rows="20" maxlength="60000"
+                                              class="form-control form-control-solid md-order-email-template__html" spellcheck="false"></textarea>
+                                </div>
 
-                        <div class="row mb-6">
-                            <label class="col-lg-4 col-form-label required fw-bold fs-6" for="order-email-template-html">HTML 模板</label>
-                            <div class="col-lg-8 fv-row">
-                                <textarea id="order-email-template-html" name="html" rows="20" maxlength="60000"
-                                          class="form-control form-control-solid md-order-email-template__html" spellcheck="false"></textarea>
-                            </div>
-                        </div>
+                                <div class="md-order-email-template__placeholders-section">
+                                    <div class="md-order-email-template__placeholders-title">可用占位符</div>
+                                    <p class="md-order-email-template__placeholders-help">点击占位符可复制，发送邮件时会替换为对应订单信息。</p>
+                                    <div id="order-email-template-placeholders" class="md-order-email-template__placeholders"></div>
+                                </div>
+                            </section>
 
-                        <div class="row">
-                            <div class="col-lg-4 col-form-label fw-bold fs-6">预览</div>
-                            <div class="col-lg-8 fv-row">
-                                <iframe id="order-email-template-preview" class="md-order-email-template__preview" sandbox="" title="订单发货邮件预览"></iframe>
-                            </div>
+                            <section class="md-order-email-template__preview-panel" aria-label="订单发货邮件预览">
+                                <div class="md-order-email-template__preview-heading">
+                                    <span class="md-order-email-template__preview-title">实时预览</span>
+                                    <span id="order-email-template-preview-subject" class="md-order-email-template__preview-subject"></span>
+                                </div>
+                                <div class="md-order-email-template__preview-canvas">
+                                    <iframe id="order-email-template-preview" class="md-order-email-template__preview" sandbox="allow-same-origin" title="订单发货邮件预览"></iframe>
+                                </div>
+                                <p class="md-order-email-template__preview-help">预览使用示例订单数据生成，并在禁用脚本的沙盒中显示。</p>
+                            </section>
                         </div>
                     </div>
                     <div class="card-footer d-flex flex-wrap justify-content-center py-6 px-9 gap-2">
@@ -287,5 +401,5 @@
 <!--end::Content-->
 
 
-#{ready("/assets/admin/controller/config/mail.js")}
+#{ready("/assets/admin/controller/config/mail.js?rev=email-template-layout-20260919")}
 #{include file="../Footer.html"}

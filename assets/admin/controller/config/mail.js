@@ -201,11 +201,18 @@
         $form.find('[name="logo_url"]').val(template.logo_url || '');
         $form.find('[name="subject"]').val(template.subject || '');
         $form.find('[name="html"]').val(template.html || '');
+        updatePreviewSubject(template.subject);
     }
 
-    function setPreview(html) {
+    function updatePreviewSubject(subject) {
+        const element = document.getElementById('order-email-template-preview-subject');
+        if (element) element.textContent = String(subject || '').trim();
+    }
+
+    function setPreview(html, subject) {
         const preview = document.getElementById('order-email-template-preview');
         if (preview) preview.srcdoc = String(html || '');
+        updatePreviewSubject(subject);
     }
 
     function copyPlaceholder(value) {
@@ -261,7 +268,7 @@
             done: res => {
                 if (!active) return;
                 setBusy(false);
-                setPreview(res.data?.html);
+                setPreview(res.data?.html, res.data?.subject);
                 if (notice) layer.msg('预览已刷新');
             },
             error: res => {
@@ -413,6 +420,9 @@
 
     $('#order-email-template-placeholders').off(namespace).on('click' + namespace, '[data-placeholder]', function () {
         copyPlaceholder(String(this.dataset.placeholder || ''));
+    });
+    $form.off('input' + namespace, '[name="subject"]').on('input' + namespace, '[name="subject"]', function () {
+        updatePreviewSubject(this.value);
     });
     $('.order-email-template-preview').off(namespace).on('click' + namespace, () => refreshPreview(true));
     $('.order-email-template-save').off(namespace).on('click' + namespace, saveTemplate);
