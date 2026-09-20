@@ -1111,17 +1111,50 @@ class Order implements \App\Service\Order
 
         $order->save();
 
-        if ($commodity->contact_type == 2 && $commodity->send_email == 1 && $order->owner == 0) {
+        $deliveryEmail = $this->deliveryEmailRecipient($order, $commodity);
+        if ($deliveryEmail !== null) {
             try {
                 $mail = $this->orderDeliveryEmailTemplate->render($order, $commodity, $order->pay);
-                $this->email->send($order->contact, $mail['subject'], $mail['html']);
+                if (!$this->email->send($deliveryEmail, $mail['subject'], $mail['html'])) {
+                    debug("订单发货邮件发送失败：订单号{$order->trade_no}");
+                }
             } catch (\Exception|\Error $e) {
+                // Mail delivery must never change a successfully paid order into a failed one.
+                debug("订单发货邮件发送失败：订单号{$order->trade_no}");
             }
+        } elseif ((int)$commodity->send_email === 1 && (int)$order->owner > 0) {
+            // Older username-only members may not have an email. Keep delivery normal and leave a safe diagnostic.
+            debug("订单发货邮件未发送：订单号{$order->trade_no}，会员ID{$order->owner}未绑定有效邮箱");
         }
 
         hook(Hook::USER_API_ORDER_PAY_AFTER, $commodity, $order, $order->pay);
 
         return (string)$order->secret;
+    }
+
+    /**
+     * Resolve the destination for an automatic delivery email.
+     *
+     * Members receive mail at their account email; guests retain the existing
+     * email-contact flow. A missing or malformed address deliberately returns
+     * null so an order can still be delivered normally.
+     */
+    private function deliveryEmailRecipient(\App\Model\Order $order, Commodity $commodity): ?string
+    {
+        if ((int)$commodity->send_email !== 1) {
+            return null;
+        }
+
+        if ((int)$order->owner > 0) {
+            $email = User::query()->whereKey($order->owner)->value('email');
+        } elseif ((int)$commodity->contact_type === 2) {
+            $email = $order->contact;
+        } else {
+            return null;
+        }
+
+        $email = trim((string)$email);
+        return filter_var($email, FILTER_VALIDATE_EMAIL) === false ? null : $email;
     }
 
     private function pullCardForLocal(\App\Model\Order $order, Commodity $commodity): string
