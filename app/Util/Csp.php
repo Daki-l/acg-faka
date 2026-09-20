@@ -7,6 +7,10 @@ use App\Model\Config;
 
 final class Csp
 {
+    private const EMBEDDED_SHOP_HOST = 'shop.weiloo.com';
+
+    private const EMBED_PARENT = 'https://ai.weiloo.com';
+
     /** nonce 密钥在 config 表里的键名（NEVER_CACHE 通道，只存库） */
     public const SECRET_CONFIG = 'csp_nonce_secret';
 
@@ -76,6 +80,23 @@ final class Csp
     public static function header(): string
     {
         return self::enforcing() ? 'Content-Security-Policy' : 'Content-Security-Policy-Report-Only';
+    }
+
+    /**
+     * The new shop domain is intentionally embeddable only by the Weiloo
+     * console. X-Frame-Options cannot express this allowlist, so callers use
+     * this together with the CSP frame-ancestors directive.
+     */
+    public static function allowsExternalFrameAncestor(): bool
+    {
+        return strtolower(rtrim(Client::getDomain(), '.')) === self::EMBEDDED_SHOP_HOST;
+    }
+
+    public static function frameAncestors(): string
+    {
+        return self::allowsExternalFrameAncestor()
+            ? "'self' " . self::EMBED_PARENT
+            : "'self'";
     }
 
     public static function nonce(): string
@@ -270,7 +291,7 @@ final class Csp
             //浏览器会回退到 script-src，而那里没有 blob:，Worker 直接被拦、编辑器功能失效。
             //worker-src 本来就在 EXTENSIBLE 名单里，但之前漏了输出，插件声明也会被静默丢掉。
             $directive('worker-src', "'self' blob:"),
-            "frame-ancestors 'self'",
+            'frame-ancestors ' . self::frameAncestors(),
             "object-src 'none'",
             "base-uri 'self'",
             "form-action 'self'",

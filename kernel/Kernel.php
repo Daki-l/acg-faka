@@ -114,9 +114,11 @@ try {
 
     if (!headers_sent()) {
         header("X-Content-Type-Options: nosniff");
-        header("X-Frame-Options: SAMEORIGIN");
+        if (!\App\Util\Csp::allowsExternalFrameAncestor()) {
+            header("X-Frame-Options: SAMEORIGIN");
+        }
         header("Referrer-Policy: strict-origin-when-cross-origin");
-        header("Content-Security-Policy: frame-ancestors 'self'; object-src 'none'; base-uri 'self'");
+        header("Content-Security-Policy: frame-ancestors " . \App\Util\Csp::frameAncestors() . "; object-src 'none'; base-uri 'self'");
         if (\App\Util\Csp::enabled()) {
             header(\App\Util\Csp::header() . ": " . \App\Util\Csp::policy());
         }
