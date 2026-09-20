@@ -17,6 +17,7 @@ class OrderDeliveryEmailTemplate implements \App\Service\OrderDeliveryEmailTempl
     private const DEFAULT_LOGO_URL = 'https://pub-50596955a81a4c48b14be13b50c9a58b.r2.dev/logo.png';
     private const DEFAULT_SUBJECT = '【发货提醒】Weiloo 小店订单已发货';
     private const PLACEHOLDER_PATTERN = '/\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}/';
+    private const ENCODED_PLACEHOLDER_PATTERN = '/%7B%7B(?:%20|\s)*([a-z_][a-z0-9_]*)(?:%20|\s)*%7D%7D/i';
 
     private const PLACEHOLDERS = [
         'site_name' => '店铺名称',
@@ -145,8 +146,8 @@ class OrderDeliveryEmailTemplate implements \App\Service\OrderDeliveryEmailTempl
     /** @return array{subject: string, html: string, logo_url: string} */
     private function validateTemplate(string $subject, string $html, string $logoUrl): array
     {
-        $subject = trim($subject);
-        $html = trim($html);
+        $subject = trim($this->normalizeEncodedPlaceholders($subject));
+        $html = trim($this->normalizeEncodedPlaceholders($html));
         $logoUrl = trim($logoUrl);
 
         if ($subject === '' || $html === '' || $logoUrl === '') {
@@ -164,6 +165,15 @@ class OrderDeliveryEmailTemplate implements \App\Service\OrderDeliveryEmailTempl
         $this->assertHttpsUrl($logoUrl);
 
         return ['subject' => $subject, 'html' => $html, 'logo_url' => $logoUrl];
+    }
+
+    private function normalizeEncodedPlaceholders(string $value): string
+    {
+        return (string)preg_replace_callback(
+            self::ENCODED_PLACEHOLDER_PATTERN,
+            static fn(array $match): string => '{{' . $match[1] . '}}',
+            $value
+        );
     }
 
     private function assertPlaceholders(string $value, string $label): void
