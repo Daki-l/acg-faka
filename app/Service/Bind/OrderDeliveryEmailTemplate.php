@@ -7,6 +7,7 @@ use App\Model\Commodity;
 use App\Model\Config as CFG;
 use App\Model\Order;
 use App\Model\Pay;
+use App\Model\User;
 use App\Util\Currency;
 use Kernel\Exception\JSONException;
 use Kernel\Util\Decimal;
@@ -24,7 +25,8 @@ class OrderDeliveryEmailTemplate implements \App\Service\OrderDeliveryEmailTempl
         'logo_url' => 'Logo 地址',
         'order_no' => '订单号',
         'order_time' => '订单时间',
-        'account' => '购买账号',
+        'member_username' => '会员账号',
+        'account' => '会员账号（兼容旧模板）',
         'product_name' => '商品名称',
         'quantity' => '购买数量',
         'product_amount' => '商品金额',
@@ -105,13 +107,16 @@ class OrderDeliveryEmailTemplate implements \App\Service\OrderDeliveryEmailTempl
         $totalAmount = $this->numeric($order->amount);
         $productAmount = (new Decimal($totalAmount, 2))->sub($payCost)->getAmount(2);
         $time = $this->string($order->pay_time) ?: $this->string($order->create_time);
+        $memberUsername = $this->memberUsername($order);
 
         return $this->renderTemplate($template, [
             'site_name' => $this->siteName(),
             'logo_url' => $template['logo_url'],
             'order_no' => $this->string($order->trade_no),
             'order_time' => $this->formatTime($time),
-            'account' => $this->string($order->contact),
+            'member_username' => $memberUsername,
+            // Keep existing custom templates from exposing order contact details.
+            'account' => $memberUsername,
             'product_name' => $commodity ? $this->string($commodity->name) : '商品信息未记录',
             'quantity' => (string)max(0, (int)$order->card_num),
             'product_amount' => $this->formatMoney($productAmount),
@@ -249,7 +254,8 @@ class OrderDeliveryEmailTemplate implements \App\Service\OrderDeliveryEmailTempl
             'logo_url' => self::DEFAULT_LOGO_URL,
             'order_no' => 'TEST202609180001',
             'order_time' => '2026-09-18 12:00:00',
-            'account' => 'demo@example.com',
+            'member_username' => 'weiloo_member',
+            'account' => 'weiloo_member',
             'product_name' => '示例商品',
             'quantity' => '1',
             'product_amount' => $this->formatMoney('98.00'),
@@ -258,6 +264,17 @@ class OrderDeliveryEmailTemplate implements \App\Service\OrderDeliveryEmailTempl
             'payment_method' => '支付宝（示例）',
             'delivery_content' => "账号：demo@example.com\n密码：示例内容（测试邮件不包含真实卡密）",
         ];
+    }
+
+    private function memberUsername(Order $order): string
+    {
+        $ownerId = (int)$order->owner;
+        if ($ownerId <= 0) {
+            return '游客购买';
+        }
+
+        $username = User::query()->whereKey($ownerId)->value('username');
+        return $this->string($username) ?: '会员购买';
     }
 
     private function siteName(): string
